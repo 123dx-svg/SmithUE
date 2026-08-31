@@ -16,14 +16,17 @@
 #include "Widgets/Notifications/SNotificationList.h"
 
 #include "SmithUEModule.h"
+#include "SmithUESettings.h"
 
 // ---------------------------------------------------------------------------
 // Module-level constants and state (game-thread-confined writes, no lock)
 // ---------------------------------------------------------------------------
 
-// Minimum smithue-cli version the plugin recommends. BUMP THIS ON EVERY CLI
-// RELEASE: a higher floor makes machines with an older CLI show "Outdated → 升级",
-// and upgrading the CLI re-runs its postinstall which re-deploys the latest SKILL.
+// Lower bound on the smithue-cli version the plugin needs. This is only a FLOOR:
+// the live npm `latest` is queried on every probe and wins whenever it is newer,
+// so a CLI release no longer requires bumping this constant for machines to
+// upgrade. Bump it only when the plugin genuinely requires a newer CLI (i.e. the
+// floor is a compatibility contract, not a release marker).
 static constexpr TCHAR kRecommendedCliVersion[] = TEXT("0.15.0");
 
 /** Last known CLI environment state. Written only on the game thread. */
@@ -38,8 +41,27 @@ static FThreadSafeBool bInstallInFlight;
 /** Set by CancelCliInstall(); polled by the install worker loop to terminate the subprocess. */
 static FThreadSafeBool bInstallCancelRequested;
 
+/**
+ * Never set. Passed to RunBounded for probes that are time-bounded but not
+ * user-cancellable, so the one cancel flag stays exclusive to the install.
+ */
+static FThreadSafeBool bNeverCancel;
+
 /** Hard timeout for the install/upgrade subprocess (seconds). */
 static constexpr double kInstallTimeoutSeconds = 120.0;
+
+/**
+ * Hard timeout for the `npm view` registry lookup (seconds). Kept short: it runs
+ * on every probe and an unreachable registry must not stall the check.
+ */
+static constexpr double kRegistryQueryTimeoutSeconds = 20.0;
+
+/**
+ * Guards the automatic upgrade to once per editor session. Also stops the
+ * self-retrigger loop, since a successful install re-runs CheckCliEnvironment().
+ * Game thread only.
+ */
+static bool GAutoUpgradeAttempted = false;
 
 // Static member definition
 FOnCliCheckComplete FSmithUECliChecker::OnCliCheckComplete;
@@ -214,6 +236,43 @@ TOptional<FString> ParseNpmLsCliVersion(const FString& json)
     }
 
     return Version;
+}
+
+FString ResolveTargetCliVersion(const FString& Floor, const FString& NpmLatest)
+{
+    const TOptional<FSmithUESemver> FloorVer  = ParseSemver(Floor);
+    const TOptional<FSmithUESemver> LatestVer = ParseSemver(NpmLatest);
+
+    if (!LatestVer.IsSet())
+    {
+        // Offline, npm missing, or a malformed dist-tag: fall back to the floor.
+        return FloorVer.IsSet() ? Floor : FString();
+    }
+    if (!FloorVer.IsSet())
+    {
+        return NpmLatest;
+    }
+    return CompareSemver(LatestVer.GetValue(), FloorVer.GetValue()) > 0 ? NpmLatest : Floor;
+}
+
+bool IsCliOutdated(const FString& Installed, const FString& Target)
+{
+    const TOptional<FSmithUESemver> TargetVer = ParseSemver(Target);
+    if (!TargetVer.IsSet())
+    {
+        // Nothing credible to compare against — never report a false "outdated".
+        return false;
+    }
+
+    const TOptional<FSmithUESemver> InstalledVer = ParseSemver(Installed);
+    if (!InstalledVer.IsSet())
+    {
+        // A target exists but the installed version is unreadable: treat as outdated
+        // so a reinstall can repair it.
+        return true;
+    }
+
+    return CompareSemver(InstalledVer.GetValue(), TargetVer.GetValue()) < 0;
 }
 
 } // namespace SmithUECliInternal
@@ -514,6 +573,60 @@ ESkillState ComputeSkillState(const FString& NpmCliJs, FString& OutSourcePath)
 
 } // anonymous namespace
 
+/**
+ * Decide whether to upgrade smithue-cli without asking. Game thread only.
+ *
+ * Deliberately conservative: it modifies the user's GLOBAL npm environment, so it
+ * runs at most once per editor session, only when opted in, and only when there
+ * is a working npm and something concrete to fix.
+ */
+static void MaybeAutoUpgradeCli()
+{
+    if (GAutoUpgradeAttempted)
+    {
+        return;
+    }
+
+    const USmithUESettings* Settings = GetDefault<USmithUESettings>();
+    if (!Settings || !Settings->bAutoUpgradeCliOnStartup)
+    {
+        return;
+    }
+
+    const ECliState State = GCachedCliInfo.State;
+    if (State != ECliState::Outdated && State != ECliState::NotInstalled)
+    {
+        return;
+    }
+
+    // No npm means no way to install; the panel already surfaces that.
+    if (GCachedCliInfo.NpmVersion.IsEmpty())
+    {
+        UE_LOG(LogSmithUE, Warning,
+               TEXT("[SmithUE CLI] auto-upgrade skipped: npm not available"));
+        return;
+    }
+
+    // Set BEFORE launching: a successful install re-runs CheckCliEnvironment(),
+    // which would otherwise re-enter this function.
+    GAutoUpgradeAttempted = true;
+
+    const FString Target = GCachedCliInfo.TargetVersion.IsEmpty()
+        ? TEXT("latest")
+        : GCachedCliInfo.TargetVersion;
+
+    UE_LOG(LogSmithUE, Log,
+           TEXT("[SmithUE CLI] auto-upgrade: state=%d installed='%s' target='%s'"),
+           static_cast<int32>(State), *GCachedCliInfo.CliVersion, *Target);
+
+    ShowToast(State == ECliState::NotInstalled
+        ? FString::Printf(TEXT("SmithUE: 正在自动安装 smithue-cli %s…"), *Target)
+        : FString::Printf(TEXT("SmithUE: 正在自动升级 smithue-cli %s → %s…"),
+                          *GCachedCliInfo.CliVersion, *Target));
+
+    FSmithUECliChecker::ExecuteCliInstall();
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -597,6 +710,39 @@ void FSmithUECliChecker::CheckCliEnvironment()
         const TOptional<FString> CliVer = ParseNpmLsCliVersion(LsOut);
 
         // ----------------------------------------------------------------
+        // 3.5. Ask the registry what "latest" actually is.
+        //      Without this the plugin can only compare against its own hardcoded
+        //      floor, which goes stale the moment a new CLI ships -- the machine
+        //      then reports "Ready" forever and never upgrades.
+        //      Bounded and failure-tolerant: offline simply means no latest.
+        // ----------------------------------------------------------------
+        FString ViewOut;
+        if (!NpmCliJs.IsEmpty())
+        {
+            const FBoundedRun ViewRun = RunBounded(TEXT("node.exe"),
+                FString::Printf(TEXT("\"%s\" view smithue-cli version --no-audit --no-fund --fetch-timeout=15000 --fetch-retries=1"), *NpmCliJs),
+                kRegistryQueryTimeoutSeconds, bNeverCancel, ViewOut);
+            UE_LOG(LogSmithUE, Log, TEXT("[SmithUE CLI] npm view probe: rc=%d timedout=%d out='%s'"),
+                   ViewRun.Rc, ViewRun.bTimedOut ? 1 : 0, *ViewOut.TrimStartAndEnd());
+
+            // npm prints warnings to the same combined stream, so take the last
+            // line that parses as a semver rather than the whole blob.
+            TArray<FString> Lines;
+            ViewOut.ParseIntoArrayLines(Lines);
+            for (int32 i = Lines.Num() - 1; i >= 0; --i)
+            {
+                const TOptional<FString> Candidate = ClassifyVersionProbe(0, Lines[i]);
+                if (Candidate.IsSet())
+                {
+                    Info.LatestVersion = Candidate.GetValue();
+                    break;
+                }
+            }
+        }
+
+        Info.TargetVersion = ResolveTargetCliVersion(FString(kRecommendedCliVersion), Info.LatestVersion);
+
+        // ----------------------------------------------------------------
         // 4. Compute state
         // ----------------------------------------------------------------
         if (!CliVer.IsSet())
@@ -606,19 +752,9 @@ void FSmithUECliChecker::CheckCliEnvironment()
         else
         {
             Info.CliVersion = CliVer.GetValue();
-
-            const TOptional<FSmithUESemver> Installed   = ParseSemver(Info.CliVersion);
-            const TOptional<FSmithUESemver> Recommended = ParseSemver(FString(kRecommendedCliVersion));
-
-            if (Installed.IsSet() && Recommended.IsSet()
-                && CompareSemver(Installed.GetValue(), Recommended.GetValue()) < 0)
-            {
-                Info.State = ECliState::Outdated;
-            }
-            else
-            {
-                Info.State = ECliState::Ready;
-            }
+            Info.State = IsCliOutdated(Info.CliVersion, Info.TargetVersion)
+                ? ECliState::Outdated
+                : ECliState::Ready;
         }
         Info.bValid = true;
 
@@ -640,6 +776,10 @@ void FSmithUECliChecker::CheckCliEnvironment()
             GCachedCliInfo = Info;
             FSmithUECliChecker::OnCliCheckComplete.Broadcast();
             bCliCheckInFlight = false;
+
+            // Opt-in, once per session. Must run after the flag is cleared so the
+            // install's follow-up re-check is not blocked by the in-flight guard.
+            MaybeAutoUpgradeCli();
         });
     });
 }
@@ -760,6 +900,21 @@ FString FSmithUECliChecker::GetNpmVersion()
 FString FSmithUECliChecker::GetCliVersion()
 {
     return GCachedCliInfo.CliVersion;
+}
+
+FString FSmithUECliChecker::GetLatestCliVersion()
+{
+    return GCachedCliInfo.LatestVersion;
+}
+
+FString FSmithUECliChecker::GetTargetCliVersion()
+{
+    return GCachedCliInfo.TargetVersion;
+}
+
+bool FSmithUECliChecker::HasAttemptedAutoUpgrade()
+{
+    return GAutoUpgradeAttempted;
 }
 
 FDateTime FSmithUECliChecker::GetLastCheckTime()

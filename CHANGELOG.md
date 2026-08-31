@@ -1,5 +1,55 @@
 # SmithUE Changelog
 
+## v1.16.4（UE5.8，2026-08-31）
+
+### smithue-cli 自动升级：不再需要用户点按钮
+
+原来有两个独立问题叠加，导致"自动检测"实际上永远要人工干预：
+
+1. **判定基准是写死的常量**。`kRecommendedCliVersion` 是插件源码里的字面量，
+   CLI 一发新版它立刻过期 —— 装着 0.15.0 的机器在 CLI 已发 0.16 之后
+   仍然显示 `✓ Ready`，**永远不会提示升级**。要生效必须改插件源码并重新发插件。
+2. **检测出来了也只是"显示"**。`Outdated` 只是把按钮点亮，没有任何自动执行路径。
+
+改法：
+
+- **查真实的 npm latest**：探测阶段新增 `npm view smithue-cli version`
+  （`RunBounded`，20s 硬超时，失败/离线容错）。目标版本 =
+  `max(插件写死的下限, npm latest)`。写死的常量退化为**兼容性下限**
+  （插件确实需要更新 CLI 时才抬），不再是发版标记 —— **CLI 发版不再需要动插件**。
+- **自动执行升级**：探测完成后在 game thread 走 `MaybeAutoUpgradeCli()`，
+  命中 `Outdated` / `NotInstalled` 就直接调 `ExecuteCliInstall()`，并弹 toast 告知。
+  刻意保守：**每个编辑器会话最多一次**、必须已开启开关、必须探测到可用的 npm。
+  一次成功安装会回调 `CheckCliEnvironment()`，`GAutoUpgradeAttempted` 同时兼作
+  防重入哨兵，避免"升级 → 重查 → 再升级"的自激循环。
+- **新开关** `bAutoUpgradeCliOnStartup`（Project Settings → Plugins → SmithUE →
+  Status & Updates，默认开，依赖 `bCheckCliOnStartup`）。
+  它会改动机器的**全局 npm 包**，共享机 / 受控环境 / 版本被策略钉死的场合应关掉。
+- **面板补强**：状态行增加 `(npm latest X)`；安装按钮在 `Ready` 状态下**不再置灰**，
+  变为「强制重装」—— 此前健康机器没有任何途径重装 CLI 或重推 SKILL。
+
+新增纯函数 `SmithUECliInternal::ResolveTargetCliVersion` / `IsCliOutdated`
+（放公共头 + `SMITHUE_API`，遵循本仓库"纯逻辑可测"的约定），
+配套 Automation 测试 `SmithUECliChecker.ResolveTargetCliVersion` /
+`SmithUECliChecker.IsCliOutdated` 覆盖：latest 高于/低于/等于下限、离线无 latest、
+npm 吐垃圾、预发布版不得压过正式版、以及"无可信目标时绝不误判 outdated"
+（否则断网机器每次启动都会重装）。
+
+**端到端实测**：把全局 CLI 降到 `0.14.1` → 启动编辑器 → 未做任何点击：
+```
+[SmithUE CLI] npm view probe: rc=0 timedout=0 out='0.15.0'
+[SmithUE CLI] auto-upgrade: state=2 installed='0.14.1' target='0.15.0'
+[SmithUE CLI] install: rc=0 timedOut=0 cancelled=0 out='changed 7 packages in 2s'
+[SmithUE CLI] skill state: 3   (Synced)
+```
+`npm ls -g` 确认已回到 `0.15.0`，且第二轮探测**没有**再次触发 auto-upgrade（防重入生效）。
+
+### 未做：编译期（UBT）钩子
+"项目编译时升级"需要把 npm 调用塞进 `SmithUE.Build.cs`（跑在 UBT 的 C# 进程里）。
+没有做，因为它会：每次编译都联网、拖慢并可能卡住构建、在 CI / 离线 / 构建农场上
+破坏可重复性，且出错时没有 UI 可反馈。编辑器启动钩子覆盖了同样的场景
+（插件重编译后必然重启编辑器）。如确需编译期升级，应作为显式的一次性脚本，而非 Build.cs 副作用。
+
 ## v1.16.3（UE5.8，2026-08-31）
 
 ### 修复：只能读到节点自身信息，读不到节点"引用了什么"

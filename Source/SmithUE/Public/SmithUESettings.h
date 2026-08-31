@@ -48,6 +48,19 @@ public:
 		meta=(ToolTip="Detect Node.js / npm / smithue-cli environment on Editor startup. Non-blocking. Result visible in Project Settings → SmithUE."))
 	bool bCheckCliOnStartup = true;
 
+	/**
+	 * If true, an out-of-date (or missing) smithue-cli is upgraded automatically
+	 * after the startup probe, without waiting for a button press.
+	 * Runs at most once per Editor session and only when npm is available.
+	 * NOTE: this modifies the machine's GLOBAL npm packages. Turn it off on shared
+	 * or locked-down machines, or where the CLI version is pinned by policy.
+	 * Requires bCheckCliOnStartup.
+	 */
+	UPROPERTY(config, EditAnywhere, Category="Status & Updates",
+		meta=(EditCondition="bCheckCliOnStartup",
+			  ToolTip="Automatically run 'npm i -g smithue-cli@latest' on Editor startup when the CLI is missing or outdated. Once per session. Modifies global npm packages."))
+	bool bAutoUpgradeCliOnStartup = true;
+
 	/** Guide: visit Pollinations.ai to register and get your free API key for audio generation.
 	 *  Image generation (generate_texture) is free and requires no key.
 	 *  Audio generation (generate_audio) requires a Pollinations API key (free quota available). */

@@ -47,6 +47,21 @@ namespace SmithUECliInternal
      */
     SMITHUE_API TOptional<FString> ParseNpmLsCliVersion(const FString& json);
 
+    /**
+     * Pick the version smithue-cli should be brought up to.
+     * The plugin's hardcoded floor goes stale the moment a new CLI ships, so the
+     * registry's `latest` wins whenever it is newer. Either input may be empty or
+     * unparsable; the result is the best of what is available (possibly empty).
+     */
+    SMITHUE_API FString ResolveTargetCliVersion(const FString& Floor, const FString& NpmLatest);
+
+    /**
+     * True when Installed is strictly below Target.
+     * An empty/unparsable Target means "nothing to compare against" → not outdated.
+     * An unparsable Installed against a valid Target counts as outdated.
+     */
+    SMITHUE_API bool IsCliOutdated(const FString& Installed, const FString& Target);
+
 } // namespace SmithUECliInternal
 
 // ---------------------------------------------------------------------------
@@ -60,8 +75,8 @@ enum class ECliState : uint8
 {
     NoNode,       // node.exe not found on PATH
     NotInstalled, // node found, but smithue-cli not globally installed
-    Outdated,     // smithue-cli installed but below the recommended floor
-    Ready         // smithue-cli installed and meets the minimum version
+    Outdated,     // smithue-cli installed but below the target version
+    Ready         // smithue-cli installed and at (or above) the target version
 };
 
 /**
@@ -82,6 +97,8 @@ struct FCliInfo
     FString     NodeVersion;
     FString     NpmVersion;
     FString     CliVersion;
+    FString     LatestVersion;  // npm registry "latest" dist-tag (empty when offline / npm missing)
+    FString     TargetVersion;  // what the CLI should be at: max(hardcoded floor, LatestVersion)
     ECliState   State          = ECliState::NoNode;
     FDateTime   LastCheckTime;
     bool        bValid         = false;
@@ -103,7 +120,9 @@ public:
 
     /**
      * Install or upgrade smithue-cli globally via npm.
-     * ONLY call this on an explicit user action (button press).
+     * Called on an explicit user action (button press) and, when
+     * USmithUESettings::bAutoUpgradeCliOnStartup is enabled, automatically once per
+     * editor session after the startup probe reports NotInstalled/Outdated.
      * Bounded by a hard timeout; cancellable via CancelCliInstall().
      */
     static void ExecuteCliInstall();
@@ -115,9 +134,16 @@ public:
     static FString   GetNodeVersion();
     static FString   GetNpmVersion();
     static FString   GetCliVersion();
+    /** npm registry "latest" from the last probe. Empty when offline or npm is missing. */
+    static FString   GetLatestCliVersion();
+    /** The version the CLI should be at: max(hardcoded floor, registry latest). */
+    static FString   GetTargetCliVersion();
     static FDateTime GetLastCheckTime();
     static bool      IsCheckInFlight();
     static bool      IsInstallInFlight();
+
+    /** True once the automatic startup upgrade has fired (or been skipped) this session. */
+    static bool      HasAttemptedAutoUpgrade();
 
     /** Freshness of the locally-deployed smithue-control SKILL.md (from last probe). */
     static ESkillState GetSkillState();

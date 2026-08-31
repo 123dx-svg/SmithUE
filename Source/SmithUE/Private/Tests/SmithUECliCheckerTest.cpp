@@ -251,4 +251,80 @@ bool FTest_ParseNpmLsCliVersion::RunTest(const FString& Parameters)
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// ResolveTargetCliVersion
+// ---------------------------------------------------------------------------
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FTest_ResolveTargetCliVersion,
+    "SmithUECliChecker.ResolveTargetCliVersion",
+    EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::SmokeFilter)
+
+bool FTest_ResolveTargetCliVersion::RunTest(const FString& Parameters)
+{
+    using namespace SmithUECliInternal;
+
+    // The whole point: a registry release newer than the hardcoded floor wins,
+    // so shipping a CLI no longer requires bumping the plugin.
+    TestEqual(TEXT("latest newer than floor -> latest"),
+        ResolveTargetCliVersion(TEXT("0.15.0"), TEXT("0.16.2")), FString(TEXT("0.16.2")));
+
+    // A floor above the registry (e.g. the plugin needs an unreleased CLI) holds.
+    TestEqual(TEXT("floor newer than latest -> floor"),
+        ResolveTargetCliVersion(TEXT("0.17.0"), TEXT("0.16.2")), FString(TEXT("0.17.0")));
+
+    TestEqual(TEXT("equal -> floor"),
+        ResolveTargetCliVersion(TEXT("0.15.0"), TEXT("0.15.0")), FString(TEXT("0.15.0")));
+
+    // Offline / npm missing: the registry answer is empty, fall back to the floor.
+    TestEqual(TEXT("no latest -> floor"),
+        ResolveTargetCliVersion(TEXT("0.15.0"), TEXT("")), FString(TEXT("0.15.0")));
+
+    // Garbage from npm must not become the target.
+    TestEqual(TEXT("garbage latest -> floor"),
+        ResolveTargetCliVersion(TEXT("0.15.0"), TEXT("ERR! network")), FString(TEXT("0.15.0")));
+
+    TestEqual(TEXT("no floor -> latest"),
+        ResolveTargetCliVersion(TEXT(""), TEXT("0.16.2")), FString(TEXT("0.16.2")));
+
+    TestEqual(TEXT("neither -> empty"),
+        ResolveTargetCliVersion(TEXT(""), TEXT("")), FString());
+
+    // A prerelease on the registry must not out-rank the released floor.
+    TestEqual(TEXT("prerelease latest vs release floor -> floor"),
+        ResolveTargetCliVersion(TEXT("0.16.0"), TEXT("0.16.0-rc.1")), FString(TEXT("0.16.0")));
+
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// IsCliOutdated
+// ---------------------------------------------------------------------------
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FTest_IsCliOutdated,
+    "SmithUECliChecker.IsCliOutdated",
+    EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::SmokeFilter)
+
+bool FTest_IsCliOutdated::RunTest(const FString& Parameters)
+{
+    using namespace SmithUECliInternal;
+
+    TestTrue (TEXT("below target -> outdated"),      IsCliOutdated(TEXT("0.15.0"), TEXT("0.16.2")));
+    TestFalse(TEXT("at target -> not outdated"),     IsCliOutdated(TEXT("0.16.2"), TEXT("0.16.2")));
+    TestFalse(TEXT("above target -> not outdated"),  IsCliOutdated(TEXT("0.17.0"), TEXT("0.16.2")));
+
+    // No credible target (offline AND no floor): never claim outdated, otherwise a
+    // disconnected machine would auto-reinstall on every startup.
+    TestFalse(TEXT("empty target -> not outdated"),    IsCliOutdated(TEXT("0.15.0"), TEXT("")));
+    TestFalse(TEXT("garbage target -> not outdated"),  IsCliOutdated(TEXT("0.15.0"), TEXT("nope")));
+
+    // Unreadable installed version with a valid target: reinstall to repair.
+    TestTrue(TEXT("garbage installed + valid target -> outdated"),
+        IsCliOutdated(TEXT("???"), TEXT("0.16.2")));
+    TestTrue(TEXT("empty installed + valid target -> outdated"),
+        IsCliOutdated(TEXT(""), TEXT("0.16.2")));
+
+    TestTrue(TEXT("prerelease below release target -> outdated"),
+        IsCliOutdated(TEXT("0.16.0-rc.1"), TEXT("0.16.0")));
+
+    return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS
