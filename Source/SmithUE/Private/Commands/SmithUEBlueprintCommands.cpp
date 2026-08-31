@@ -1,4 +1,4 @@
-﻿// Copyright 2026, 123dx-svg. MIT License.
+// Copyright 2026, 123dx-svg. MIT License.
 
 #include "Commands/SmithUEBlueprintCommands.h"
 #include "Blueprint/SmithUEBpAtomicAPI.h"
@@ -13,18 +13,25 @@
 #include "Components/SceneComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Components/StaticMeshComponent.h"
+#include "Curves/CurveFloat.h"
+#include "Curves/CurveLinearColor.h"
+#include "Curves/CurveVector.h"
 #include "Engine/Blueprint.h"
 #include "Engine/BlueprintGeneratedClass.h"
+#include "Engine/MemberReference.h"
 #include "Engine/SkeletalMesh.h"
 #include "Engine/StaticMesh.h"
+#include "Engine/TimelineTemplate.h"
 #include "EdGraph/EdGraph.h"
 #include "EdGraph/EdGraphNode.h"
+#include "EdGraphNode_Comment.h"
 #include "EdGraph/EdGraphPin.h"
 #include "EdGraphSchema_K2.h"
 #include "Engine/SCS_Node.h"
 #include "Engine/SimpleConstructionScript.h"
 #include "GameFramework/Actor.h"
 #include "K2Node_CallFunction.h"
+#include "K2Node_AddComponent.h"
 #include "K2Node_ComponentBoundEvent.h"
 #include "K2Node_Event.h"
 #include "K2Node_FunctionEntry.h"
@@ -34,6 +41,8 @@
 #include "Materials/MaterialInterface.h"
 #include "ScopedTransaction.h"
 #include "UObject/Class.h"
+#include "UObject/SoftObjectPath.h"
+#include "UObject/UnrealType.h"
 
 #include <initializer_list>
 
@@ -91,9 +100,464 @@ namespace
         return Type;
     }
 
-	TSharedPtr<FJsonObject> MakeErrResp(const FString& Message)
+    TSharedPtr<FJsonObject> MakeErrResp(const FString& Message)
     {
         return FSmithUECommonUtils::CreateErrorResponse(Message);
+    }
+
+    // ------------------------------------------------------------------
+    // Node reference extraction ("refs")
+    // ------------------------------------------------------------------
+    // A node's real semantics live in its UPROPERTYs, not in the generic
+    // UEdGraphNode surface (class/title/pins): which function is called
+    // (FunctionReference), which variable/property is read (VariableReference),
+    // the property-access path, the cast target class, ... Reflecting over the
+    // properties declared *below* UEdGraphNode covers every node class -- present
+    // and future -- without per-class special-casing.
+    //
+    // To keep the payload small we only export "reference-like" values (names,
+    // text, object/class refs, enums, member references) and skip values that
+    // still equal the class default. Nested structs, maps and node-owned
+    // sub-objects are walked recursively (bounded by GMaxRefDepth), which is how
+    // AnimGraph property bindings surface without an AnimGraph module dependency.
+
+    constexpr int32 GMaxRefValueLen = 512;
+    constexpr int32 GMaxRefDepth = 4;
+
+    TSharedPtr<FJsonObject> MemberReferenceToJson(const FMemberReference& Ref)
+    {
+        TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
+        const FName MemberName = Ref.GetMemberName();
+        if (MemberName.IsNone())
+        {
+            return nullptr;
+        }
+        Obj->SetStringField(TEXT("member_name"), MemberName.ToString());
+        if (const UClass* ParentClass = Ref.GetMemberParentClass())
+        {
+            Obj->SetStringField(TEXT("member_parent"), ParentClass->GetPathName());
+        }
+        else if (const FString ScopeName = Ref.GetMemberScopeName(); !ScopeName.IsEmpty())
+        {
+            Obj->SetStringField(TEXT("member_scope"), ScopeName);
+        }
+        if (Ref.IsSelfContext())
+        {
+            Obj->SetBoolField(TEXT("self"), true);
+        }
+        return Obj;
+    }
+
+    TSharedPtr<FJsonValue> RefPropertyToJson(const FProperty* Prop, const void* ValuePtr, const UObject* Root, int32 Depth);
+
+    /**
+     * Walk a UStruct layout (UClass or UScriptStruct) and collect its
+     * reference-like fields. Fields identical to `DefaultContainer` are skipped;
+     * pass null to emit everything. Returns null when nothing was collected.
+     */
+    TSharedPtr<FJsonObject> CollectRefFields(
+        const UStruct* Layout,
+        const void* Container,
+        const void* DefaultContainer,
+        const UObject* Root,
+        int32 Depth,
+        bool bSkipEdGraphNodeBase)
+    {
+        if (!Layout || !Container || Depth > GMaxRefDepth)
+        {
+            return nullptr;
+        }
+
+        TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
+        for (TFieldIterator<FProperty> It(Layout, EFieldIteratorFlags::IncludeSuper); It; ++It)
+        {
+            FProperty* Prop = *It;
+            // Transient values are editor scratch state (BlueprintUsage, caches),
+            // never a persisted reference.
+            if (Prop->HasAnyPropertyFlags(CPF_Deprecated | CPF_Transient))
+            {
+                continue;
+            }
+
+            // Skip everything owned by UEdGraphNode/UObject -- already serialized
+            // generically (guid, class, title, position, pins).
+            if (bSkipEdGraphNodeBase)
+            {
+                const UClass* OwnerClass = Prop->GetOwnerClass();
+                if (!OwnerClass || UEdGraphNode::StaticClass()->IsChildOf(OwnerClass))
+                {
+                    continue;
+                }
+            }
+
+            if (DefaultContainer && Prop->Identical_InContainer(Container, DefaultContainer))
+            {
+                // FMemberReference is the node's primary semantic. Some node
+                // classes bake it into their CDO (K2Node_GetEditorProperty sets
+                // FunctionReference in its constructor), so a "differs from
+                // default" test would hide exactly what we came for.
+                const FStructProperty* StructProp = CastField<FStructProperty>(Prop);
+                if (!StructProp || StructProp->Struct != FMemberReference::StaticStruct())
+                {
+                    continue;
+                }
+            }
+
+            const void* ValuePtr = Prop->ContainerPtrToValuePtr<void>(Container);
+            if (TSharedPtr<FJsonValue> Value = RefPropertyToJson(Prop, ValuePtr, Root, Depth))
+            {
+                Obj->SetField(Prop->GetName(), Value);
+            }
+        }
+
+        return Obj->Values.Num() > 0 ? Obj : nullptr;
+    }
+
+    /** Export a single "reference-like" property value. Returns null for values we skip. */
+    TSharedPtr<FJsonValue> RefPropertyToJson(const FProperty* Prop, const void* ValuePtr, const UObject* Root, int32 Depth)
+    {
+        const TSharedPtr<FJsonValue> Null;
+        if (Depth > GMaxRefDepth)
+        {
+            return Null;
+        }
+
+        // Inside nested structs / sub-objects, only genuinely reference-like
+        // leaves are kept. Emitting every bool/enum/number there drowns the
+        // useful data in per-node settings (alpha blends, LOD thresholds, ...).
+        const bool bReferencesOnly = (Depth > 0);
+
+        if (const FStructProperty* StructProp = CastField<FStructProperty>(Prop))
+        {
+            if (StructProp->Struct == FMemberReference::StaticStruct())
+            {
+                TSharedPtr<FJsonObject> Obj = MemberReferenceToJson(*static_cast<const FMemberReference*>(ValuePtr));
+                return Obj.IsValid() ? MakeShared<FJsonValueObject>(Obj) : Null;
+            }
+            if (StructProp->Struct == TBaseStructure<FSoftObjectPath>::Get())
+            {
+                const FString Path = static_cast<const FSoftObjectPath*>(ValuePtr)->ToString();
+                return Path.IsEmpty() ? Null : MakeShared<FJsonValueString>(Path);
+            }
+            if (StructProp->Struct == TBaseStructure<FSoftClassPath>::Get())
+            {
+                const FString Path = static_cast<const FSoftClassPath*>(ValuePtr)->ToString();
+                return Path.IsEmpty() ? Null : MakeShared<FJsonValueString>(Path);
+            }
+            // Pin-visibility metadata: already expressed by the node's pin list.
+            if (StructProp->Struct->GetFName() == TEXT("OptionalPinFromProperty"))
+            {
+                return Null;
+            }
+            // Unknown struct (FAnimGraphNodePropertyBinding, FAnimNode_*, ...):
+            // recurse and keep only its reference-like fields.
+            TSharedPtr<FJsonObject> Obj = CollectRefFields(
+                StructProp->Struct, ValuePtr, /*DefaultContainer*/ nullptr, Root, Depth + 1, /*bSkipEdGraphNodeBase*/ false);
+            return Obj.IsValid() ? MakeShared<FJsonValueObject>(Obj) : Null;
+        }
+
+        if (const FArrayProperty* ArrayProp = CastField<FArrayProperty>(Prop))
+        {
+            FScriptArrayHelper Helper(ArrayProp, ValuePtr);
+            TArray<TSharedPtr<FJsonValue>> Items;
+            for (int32 i = 0; i < Helper.Num(); ++i)
+            {
+                if (TSharedPtr<FJsonValue> Item = RefPropertyToJson(ArrayProp->Inner, Helper.GetRawPtr(i), Root, Depth + 1))
+                {
+                    Items.Add(Item);
+                }
+            }
+            return Items.Num() > 0 ? MakeShared<FJsonValueArray>(Items) : Null;
+        }
+
+        if (const FSetProperty* SetProp = CastField<FSetProperty>(Prop))
+        {
+            FScriptSetHelper Helper(SetProp, ValuePtr);
+            TArray<TSharedPtr<FJsonValue>> Items;
+            for (FScriptSetHelper::FIterator SetIt(Helper); SetIt; ++SetIt)
+            {
+                if (TSharedPtr<FJsonValue> Item = RefPropertyToJson(SetProp->ElementProp, Helper.GetElementPtr(SetIt), Root, Depth + 1))
+                {
+                    Items.Add(Item);
+                }
+            }
+            return Items.Num() > 0 ? MakeShared<FJsonValueArray>(Items) : Null;
+        }
+
+        // Maps carry the interesting data for AnimGraph bindings:
+        // PropertyBindings = TMap<FName, FAnimGraphNodePropertyBinding>.
+        if (const FMapProperty* MapProp = CastField<FMapProperty>(Prop))
+        {
+            FScriptMapHelper Helper(MapProp, ValuePtr);
+            TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
+            for (FScriptMapHelper::FIterator MapIt(Helper); MapIt; ++MapIt)
+            {
+                FString Key;
+                MapProp->KeyProp->ExportTextItem_Direct(Key, Helper.GetKeyPtr(MapIt), nullptr, nullptr, PPF_None);
+                if (Key.IsEmpty())
+                {
+                    continue;
+                }
+                if (TSharedPtr<FJsonValue> Value = RefPropertyToJson(MapProp->ValueProp, Helper.GetValuePtr(MapIt), Root, Depth + 1))
+                {
+                    Obj->SetField(Key, Value);
+                }
+            }
+            return Obj->Values.Num() > 0 ? MakeShared<FJsonValueObject>(Obj) : Null;
+        }
+
+        if (const FObjectPropertyBase* ObjProp = CastField<FObjectPropertyBase>(Prop))
+        {
+            const UObject* Value = ObjProp->GetObjectPropertyValue(ValuePtr);
+            if (!Value)
+            {
+                return Null;
+            }
+            // A referenced graph (K2Node_Composite::BoundGraph, macro graphs, ...):
+            // report the name so callers can drill in with bp_describe_graph,
+            // instead of recursing into every node it owns.
+            if (const UEdGraph* ReferencedGraph = Cast<UEdGraph>(Value))
+            {
+                return MakeShared<FJsonValueString>(ReferencedGraph->GetName());
+            }
+            // Sub-objects owned by the node (e.g. AnimGraphNodeBinding) hold the
+            // real data -- their asset path is meaningless, so recurse instead.
+            if (Root && Value != Root && Value->IsIn(Root))
+            {
+                TSharedPtr<FJsonObject> Obj = CollectRefFields(
+                    Value->GetClass(), Value, Value->GetClass()->GetDefaultObject(), Root, Depth + 1, /*bSkipEdGraphNodeBase*/ false);
+                return Obj.IsValid() ? MakeShared<FJsonValueObject>(Obj) : Null;
+            }
+            return MakeShared<FJsonValueString>(Value->GetPathName());
+        }
+
+        if (const FNameProperty* NameProp = CastField<FNameProperty>(Prop))
+        {
+            const FName Value = NameProp->GetPropertyValue(ValuePtr);
+            return Value.IsNone() ? Null : MakeShared<FJsonValueString>(Value.ToString());
+        }
+
+        if (const FStrProperty* StrProp = CastField<FStrProperty>(Prop))
+        {
+            const FString& Value = StrProp->GetPropertyValue(ValuePtr);
+            return Value.IsEmpty() ? Null : MakeShared<FJsonValueString>(Value.Left(GMaxRefValueLen));
+        }
+
+        if (const FTextProperty* TextProp = CastField<FTextProperty>(Prop))
+        {
+            const FString Value = TextProp->GetPropertyValue(ValuePtr).ToString();
+            return Value.IsEmpty() ? Null : MakeShared<FJsonValueString>(Value.Left(GMaxRefValueLen));
+        }
+
+        if (const FEnumProperty* EnumProp = CastField<FEnumProperty>(Prop))
+        {
+            if (bReferencesOnly)
+            {
+                return Null;
+            }
+            const int64 Value = EnumProp->GetUnderlyingProperty()->GetSignedIntPropertyValue(ValuePtr);
+            const UEnum* Enum = EnumProp->GetEnum();
+            return MakeShared<FJsonValueString>(Enum ? Enum->GetNameStringByValue(Value) : LexToString(Value));
+        }
+
+        if (const FByteProperty* ByteProp = CastField<FByteProperty>(Prop))
+        {
+            if (bReferencesOnly)
+            {
+                return Null;
+            }
+            const uint8 Value = ByteProp->GetPropertyValue(ValuePtr);
+            if (const UEnum* Enum = ByteProp->Enum)
+            {
+                return MakeShared<FJsonValueString>(Enum->GetNameStringByValue(Value));
+            }
+            return MakeShared<FJsonValueNumber>(Value);
+        }
+
+        if (const FBoolProperty* BoolProp = CastField<FBoolProperty>(Prop))
+        {
+            if (bReferencesOnly)
+            {
+                return Null;
+            }
+            return MakeShared<FJsonValueBoolean>(BoolProp->GetPropertyValue(ValuePtr));
+        }
+
+        return Null;
+    }
+
+    /**
+     * Collect the node-class-specific properties of a node (FunctionReference,
+     * VariableReference, property-access paths, anim property bindings, cast
+     * targets, ...). Only properties declared below UEdGraphNode and differing
+     * from the CDO are emitted. Returns null when there is nothing to report.
+     */
+    TSharedPtr<FJsonObject> BuildNodeRefs(const UEdGraphNode* Node)
+    {
+        if (!Node)
+        {
+            return nullptr;
+        }
+
+        const UClass* NodeClass = Node->GetClass();
+        TSharedPtr<FJsonObject> Refs = CollectRefFields(
+            NodeClass, Node, NodeClass->GetDefaultObject(), Node, /*Depth*/ 0, /*bSkipEdGraphNodeBase*/ true);
+
+        // "Add Component" nodes reference their assets through a component
+        // template stored on the Blueprint (the node only holds TemplateName),
+        // so the actual mesh/material/... would otherwise be invisible.
+        if (const UK2Node_AddComponent* AddComponentNode = Cast<UK2Node_AddComponent>(Node))
+        {
+            if (const UActorComponent* Template = AddComponentNode->GetTemplateFromNode())
+            {
+                const UClass* TemplateClass = Template->GetClass();
+                TSharedPtr<FJsonObject> TemplateRefs = CollectRefFields(
+                    TemplateClass, Template, TemplateClass->GetDefaultObject(), Template, /*Depth*/ 1, /*bSkipEdGraphNodeBase*/ false);
+                if (TemplateRefs.IsValid())
+                {
+                    if (!Refs.IsValid())
+                    {
+                        Refs = MakeShared<FJsonObject>();
+                    }
+                    Refs->SetObjectField(TEXT("component_template"), TemplateRefs);
+                }
+            }
+        }
+
+        return Refs;
+    }
+
+
+    /**
+     * Node state that lives on UEdGraphNode itself and is therefore excluded from
+     * `refs`, but changes how the graph must be READ:
+     *  - a disabled / development-only node does not run in a shipped build;
+     *  - the author's comment is the only record of intent;
+     *  - a node carrying a compiler message is broken;
+     *  - a comment box's extent is what tells you which nodes it groups.
+     */
+    void AppendNodeState(const UEdGraphNode* Node, const TSharedPtr<FJsonObject>& NodeObj)
+    {
+        switch (Node->GetDesiredEnabledState())
+        {
+        case ENodeEnabledState::Disabled:
+            NodeObj->SetStringField(TEXT("enabled"), TEXT("disabled"));
+            break;
+        case ENodeEnabledState::DevelopmentOnly:
+            NodeObj->SetStringField(TEXT("enabled"), TEXT("development_only"));
+            break;
+        default:
+            break; // Enabled: omitted, it is the norm.
+        }
+
+        if (!Node->NodeComment.IsEmpty())
+        {
+            NodeObj->SetStringField(TEXT("comment"), Node->NodeComment.Left(GMaxRefValueLen));
+        }
+
+        if (Node->bHasCompilerMessage && !Node->ErrorMsg.IsEmpty())
+        {
+            NodeObj->SetStringField(TEXT("error"), Node->ErrorMsg.Left(GMaxRefValueLen));
+        }
+
+        // Comment boxes group nodes purely geometrically, so their extent is data.
+        if (Node->IsA<UEdGraphNode_Comment>())
+        {
+            TSharedPtr<FJsonObject> Size = MakeShared<FJsonObject>();
+            Size->SetNumberField(TEXT("w"), Node->NodeWidth);
+            Size->SetNumberField(TEXT("h"), Node->NodeHeight);
+            NodeObj->SetObjectField(TEXT("size"), Size);
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Curve keyframes
+    // ------------------------------------------------------------------
+    // A Timeline's curves are usually objects embedded IN the Blueprint
+    // (BP_Foo.BP_Foo_C:CurveFloat_0), not standalone assets, so read_curve cannot
+    // reach them. Without the keys a Timeline is a black box: you know a track
+    // exists but not what it actually animates.
+
+    constexpr int32 GMaxCurveKeys = 64;
+
+    FString RichCurveKeyInterpToString(const FRichCurveKey& Key)
+    {
+        switch (Key.InterpMode)
+        {
+        case RCIM_Constant: return TEXT("constant");
+        case RCIM_Linear:   return TEXT("linear");
+        case RCIM_Cubic:
+            switch (Key.TangentMode)
+            {
+            case RCTM_Auto:  return TEXT("cubic_auto");
+            case RCTM_User:  return TEXT("cubic_user");
+            case RCTM_Break: return TEXT("cubic_break");
+            default:         return TEXT("cubic");
+            }
+        default: return TEXT("none");
+        }
+    }
+
+    TSharedPtr<FJsonValue> RichCurveKeysToJson(const FRichCurve& Curve)
+    {
+        TArray<TSharedPtr<FJsonValue>> Keys;
+        for (const FRichCurveKey& Key : Curve.GetConstRefOfKeys())
+        {
+            if (Keys.Num() >= GMaxCurveKeys)
+            {
+                break;
+            }
+            TSharedPtr<FJsonObject> KeyObj = MakeShared<FJsonObject>();
+            KeyObj->SetNumberField(TEXT("t"), Key.Time);
+            KeyObj->SetNumberField(TEXT("v"), Key.Value);
+            KeyObj->SetStringField(TEXT("interp"), RichCurveKeyInterpToString(Key));
+            if (Key.InterpMode == RCIM_Cubic && (Key.ArriveTangent != 0.f || Key.LeaveTangent != 0.f))
+            {
+                KeyObj->SetNumberField(TEXT("arrive"), Key.ArriveTangent);
+                KeyObj->SetNumberField(TEXT("leave"), Key.LeaveTangent);
+            }
+            Keys.Add(MakeShared<FJsonValueObject>(KeyObj));
+        }
+        return Keys.Num() > 0 ? MakeShared<FJsonValueArray>(Keys) : TSharedPtr<FJsonValue>();
+    }
+
+    /** Attach a curve's keyframes to a JSON object, shaped by the curve's component count. */
+    void AppendCurveKeys(const UCurveBase* Curve, const TSharedPtr<FJsonObject>& Out)
+    {
+        static const TCHAR* VectorComponents[] = { TEXT("x"), TEXT("y"), TEXT("z") };
+        static const TCHAR* ColorComponents[] = { TEXT("r"), TEXT("g"), TEXT("b"), TEXT("a") };
+
+        auto AppendComponents = [&Out](const FRichCurve* Curves, const TCHAR* const* Names, int32 Count)
+        {
+            TSharedPtr<FJsonObject> ByComponent = MakeShared<FJsonObject>();
+            for (int32 i = 0; i < Count; ++i)
+            {
+                if (TSharedPtr<FJsonValue> Keys = RichCurveKeysToJson(Curves[i]))
+                {
+                    ByComponent->SetField(Names[i], Keys);
+                }
+            }
+            if (ByComponent->Values.Num() > 0)
+            {
+                Out->SetObjectField(TEXT("keys"), ByComponent);
+            }
+        };
+
+        if (const UCurveLinearColor* ColorCurve = Cast<UCurveLinearColor>(Curve))
+        {
+            AppendComponents(ColorCurve->FloatCurves, ColorComponents, 4);
+        }
+        else if (const UCurveVector* VectorCurve = Cast<UCurveVector>(Curve))
+        {
+            AppendComponents(VectorCurve->FloatCurves, VectorComponents, 3);
+        }
+        else if (const UCurveFloat* FloatCurve = Cast<UCurveFloat>(Curve))
+        {
+            if (TSharedPtr<FJsonValue> Keys = RichCurveKeysToJson(FloatCurve->FloatCurve))
+            {
+                Out->SetField(TEXT("keys"), Keys);
+            }
+        }
     }
 
     TSharedPtr<FJsonObject> NodeToJson(UEdGraphNode* Node)
@@ -996,9 +1460,10 @@ void FSmithUEBlueprintCommands::RegisterTools(FSmithUEToolRegistry& Registry)
         FSmithUEToolSchema(
             TEXT("bp_get_summary"),
             TEXT("Blueprint"),
-            TEXT("Get Blueprint metadata summary"),
+            TEXT("Get Blueprint metadata summary: parent class, compile status, interfaces, variables (type, category, CDO default value, editable/read_only/replicated/transient/save_game/config/expose_on_spawn flags), functions (signature + local variables), macros, event graphs, custom events, input bindings, event dispatchers, timelines (tracks + curve assets + inlined keyframes), collapsed sub_graphs and components."),
             {
-                FSmithUEToolParam(TEXT("bp_path"), TEXT("string"), TEXT("Blueprint asset path, or 'level:current' / 'level:/Game/Maps/MyMap' for Level Blueprints"), true)
+                FSmithUEToolParam(TEXT("bp_path"), TEXT("string"), TEXT("Blueprint asset path, or 'level:current' / 'level:/Game/Maps/MyMap' for Level Blueprints"), true),
+                FSmithUEToolParam(TEXT("include_curve_keys"), TEXT("boolean"), TEXT("Inline Timeline curve keyframes (t/v/interp). Default true. Blueprint-embedded curves are not reachable by read_curve, so this is the only way to see them."))
             }),
         &HandleBpGetSummary);
 
@@ -1072,11 +1537,12 @@ void FSmithUEBlueprintCommands::RegisterTools(FSmithUEToolRegistry& Registry)
         FSmithUEToolSchema(
             TEXT("bp_describe_graph"),
             TEXT("Blueprint"),
-            TEXT("Describe nodes in a Blueprint graph. mode: full(default)/compact/summary/node_pins/exec_chain. exec_chain mode follows exec pins from entry points (add entry_node param to start from specific N-id)."),
+            TEXT("Describe nodes in a Blueprint graph. mode: full(default)/compact/summary/node_pins/exec_chain. exec_chain mode follows exec pins from entry points (add entry_node param to start from specific N-id). Each node also carries a 'refs' object with the node-class-specific references it holds (FunctionReference, VariableReference, component template assets, bound graph names, cast target class, ...), plus state fields when set: 'enabled' (disabled/development_only), 'comment', 'error', and 'size' for comment boxes. Pins are annotated with 'parent'/'split_into' (split struct pins -- the parent's default is stale, read the sub-pins), 'orphaned', 'hidden', 'advanced' and 'label'."),
             {
                 FSmithUEToolParam(TEXT("bp_path"), TEXT("string"), TEXT("Blueprint asset path, or 'level:current' / 'level:/Game/Maps/MyMap' for Level Blueprints"), true),
                 FSmithUEToolParam(TEXT("graph_name"), TEXT("string"), TEXT("Graph name"), true),
-                FSmithUEToolParam(TEXT("entry_node"), TEXT("string"), TEXT("For exec_chain mode: N-id to start BFS from (default: all entry points)"))
+                FSmithUEToolParam(TEXT("entry_node"), TEXT("string"), TEXT("For exec_chain mode: N-id to start BFS from (default: all entry points)")),
+                FSmithUEToolParam(TEXT("include_refs"), TEXT("boolean"), TEXT("Include the per-node 'refs' object of referenced functions/variables/properties. Default true (false in summary mode)."))
             }),
         &HandleBpDescribeGraph);
 
@@ -1117,7 +1583,7 @@ void FSmithUEBlueprintCommands::RegisterTools(FSmithUEToolRegistry& Registry)
         FSmithUEToolSchema(
             TEXT("bp_search"),
             TEXT("Blueprint"),
-            TEXT("Search nodes in a Blueprint by name (substring, case-insensitive) and/or type (exact class name). Searches all graphs (event, function, macro)."),
+            TEXT("Search nodes in a Blueprint by name (substring, case-insensitive) and/or type (exact class name). Searches all graphs (event, function, macro). Matched nodes include a 'refs' object with their node-class-specific references (called function, read variable/property, cast target, ...)."),
             {
                 FSmithUEToolParam(TEXT("bp_path"), TEXT("string"), TEXT("Blueprint asset path, or 'level:current' / 'level:/Game/Maps/MyMap' for Level Blueprints"), true),
                 FSmithUEToolParam(TEXT("name"), TEXT("string"), TEXT("Substring to match against node title (case-insensitive). Empty = no filter.")),
@@ -1164,13 +1630,47 @@ TSharedPtr<FJsonObject> FSmithUEBlueprintCommands::HandleBpGetSummary(const TSha
     }
     Data->SetArrayField(TEXT("interfaces"), Interfaces);
 
-    // --- Variables (with flags) ---
-    TArray<TSharedPtr<FJsonValue>> Variables;
-    for (const FBPVariableDescription& Var : BP->NewVariables)
+    // --- Variables (with flags, category and CDO default value) ---
+    // The authoritative default lives on the generated class CDO, not on
+    // FBPVariableDescription::DefaultValue (which is only populated for simple
+    // literal types and goes stale for structs/objects).
+    UObject* VariableDefaults = BP->GeneratedClass ? BP->GeneratedClass->GetDefaultObject() : nullptr;
+
+    auto AppendVariableDesc = [&](const FBPVariableDescription& Var, const TSharedPtr<FJsonObject>& VarObj, UObject* DefaultsOwner)
     {
-        TSharedPtr<FJsonObject> VarObj = MakeShared<FJsonObject>();
         VarObj->SetStringField(TEXT("name"), Var.VarName.ToString());
         VarObj->SetStringField(TEXT("type"), PinTypeToString(Var.VarType));
+
+        // The default category is a localized FText ("Default" / "默认"), so it must
+        // be compared against the schema constant, not the English literal.
+        if (!Var.Category.IsEmpty() && !Var.Category.EqualTo(UEdGraphSchema_K2::VR_DefaultCategory))
+        {
+            VarObj->SetStringField(TEXT("category"), Var.Category.ToString());
+        }
+
+        FString DefaultValue;
+        if (DefaultsOwner)
+        {
+            if (const FProperty* Prop = DefaultsOwner->GetClass()->FindPropertyByName(Var.VarName))
+            {
+                Prop->ExportTextItem_Direct(
+                    DefaultValue, Prop->ContainerPtrToValuePtr<void>(DefaultsOwner), nullptr, DefaultsOwner, PPF_None);
+            }
+        }
+        if (DefaultValue.IsEmpty())
+        {
+            DefaultValue = Var.DefaultValue;
+        }
+        // "()" and "None" both mean "unset" -- omit rather than pay tokens for them.
+        if (!DefaultValue.IsEmpty() && DefaultValue != TEXT("()") && DefaultValue != TEXT("None"))
+        {
+            VarObj->SetStringField(TEXT("default"), DefaultValue.Left(GMaxRefValueLen));
+        }
+
+        if (Var.PropertyFlags & CPF_Edit)
+        {
+            VarObj->SetBoolField(TEXT("editable"), true);
+        }
         if (Var.PropertyFlags & CPF_BlueprintReadOnly)
         {
             VarObj->SetBoolField(TEXT("read_only"), true);
@@ -1179,11 +1679,34 @@ TSharedPtr<FJsonObject> FSmithUEBlueprintCommands::HandleBpGetSummary(const TSha
         {
             VarObj->SetBoolField(TEXT("replicated"), true);
         }
+        if (Var.PropertyFlags & CPF_Transient)
+        {
+            VarObj->SetBoolField(TEXT("transient"), true);
+        }
+        if (Var.PropertyFlags & CPF_SaveGame)
+        {
+            VarObj->SetBoolField(TEXT("save_game"), true);
+        }
+        if (Var.PropertyFlags & CPF_Config)
+        {
+            VarObj->SetBoolField(TEXT("config"), true);
+        }
+        if (Var.HasMetaData(TEXT("ExposeOnSpawn")))
+        {
+            VarObj->SetBoolField(TEXT("expose_on_spawn"), true);
+        }
         if (Var.VarType.PinCategory == UEdGraphSchema_K2::PC_MCDelegate ||
             Var.VarType.PinCategory == UEdGraphSchema_K2::PC_Delegate)
         {
             VarObj->SetBoolField(TEXT("is_delegate"), true);
         }
+    };
+
+    TArray<TSharedPtr<FJsonValue>> Variables;
+    for (const FBPVariableDescription& Var : BP->NewVariables)
+    {
+        TSharedPtr<FJsonObject> VarObj = MakeShared<FJsonObject>();
+        AppendVariableDesc(Var, VarObj, VariableDefaults);
         Variables.Add(MakeShared<FJsonValueObject>(VarObj));
     }
     Data->SetArrayField(TEXT("variables"), Variables);
@@ -1203,13 +1726,14 @@ TSharedPtr<FJsonObject> FSmithUEBlueprintCommands::HandleBpGetSummary(const TSha
         // Extract signature from FunctionEntry/FunctionResult nodes
         TArray<TSharedPtr<FJsonValue>> Inputs;
         TArray<TSharedPtr<FJsonValue>> Outputs;
+        TArray<TSharedPtr<FJsonValue>> Locals;
         for (UEdGraphNode* Node : Graph->Nodes)
         {
             if (!Node)
             {
                 continue;
             }
-            if (Node->GetClass()->GetName().Contains(TEXT("K2Node_FunctionEntry")))
+            if (UK2Node_FunctionEntry* Entry = Cast<UK2Node_FunctionEntry>(Node))
             {
                 for (UEdGraphPin* Pin : Node->Pins)
                 {
@@ -1219,6 +1743,13 @@ TSharedPtr<FJsonObject> FSmithUEBlueprintCommands::HandleBpGetSummary(const TSha
                         Inputs.Add(MakeShared<FJsonValueString>(
                             FString::Printf(TEXT("%s:%s"), *Pin->PinName.ToString(), *PinTypeToString(Pin->PinType))));
                     }
+                }
+                // Local variables live on the entry node and are invisible everywhere else.
+                for (const FBPVariableDescription& Local : Entry->LocalVariables)
+                {
+                    TSharedPtr<FJsonObject> LocalObj = MakeShared<FJsonObject>();
+                    AppendVariableDesc(Local, LocalObj, /*DefaultsOwner*/ nullptr);
+                    Locals.Add(MakeShared<FJsonValueObject>(LocalObj));
                 }
             }
             else if (Node->GetClass()->GetName().Contains(TEXT("K2Node_FunctionResult")))
@@ -1241,6 +1772,10 @@ TSharedPtr<FJsonObject> FSmithUEBlueprintCommands::HandleBpGetSummary(const TSha
         if (Outputs.Num() > 0)
         {
             FuncObj->SetArrayField(TEXT("outputs"), Outputs);
+        }
+        if (Locals.Num() > 0)
+        {
+            FuncObj->SetArrayField(TEXT("locals"), Locals);
         }
         Functions.Add(MakeShared<FJsonValueObject>(FuncObj));
     }
@@ -1321,6 +1856,123 @@ TSharedPtr<FJsonObject> FSmithUEBlueprintCommands::HandleBpGetSummary(const TSha
     if (Delegates.Num() > 0)
     {
         Data->SetArrayField(TEXT("event_dispatchers"), Delegates);
+    }
+
+    // --- Timelines ---
+    // Timelines are not UEdGraphs, so they never showed up in any graph listing.
+    // Their curves are usually embedded in the Blueprint and thus unreachable by
+    // read_curve, so the keyframes are inlined here.
+    bool bIncludeCurveKeys = true;
+    Params->TryGetBoolField(TEXT("include_curve_keys"), bIncludeCurveKeys);
+
+    TArray<TSharedPtr<FJsonValue>> Timelines;
+    for (const UTimelineTemplate* Timeline : BP->Timelines)
+    {
+        if (!Timeline)
+        {
+            continue;
+        }
+        TSharedPtr<FJsonObject> TimelineObj = MakeShared<FJsonObject>();
+        TimelineObj->SetStringField(TEXT("name"), Timeline->GetVariableName().ToString());
+        TimelineObj->SetNumberField(TEXT("length"), Timeline->TimelineLength);
+        if (Timeline->bAutoPlay)
+        {
+            TimelineObj->SetBoolField(TEXT("auto_play"), true);
+        }
+        if (Timeline->bLoop)
+        {
+            TimelineObj->SetBoolField(TEXT("loop"), true);
+        }
+        if (Timeline->bReplicated)
+        {
+            TimelineObj->SetBoolField(TEXT("replicated"), true);
+        }
+
+        TArray<TSharedPtr<FJsonValue>> Tracks;
+        auto AddTrack = [&Tracks, bIncludeCurveKeys](const FName& TrackName, const TCHAR* Kind, const UCurveBase* Curve)
+        {
+            TSharedPtr<FJsonObject> TrackObj = MakeShared<FJsonObject>();
+            TrackObj->SetStringField(TEXT("name"), TrackName.ToString());
+            TrackObj->SetStringField(TEXT("kind"), Kind);
+            if (Curve)
+            {
+                TrackObj->SetStringField(TEXT("curve"), Curve->GetPathName());
+                if (bIncludeCurveKeys)
+                {
+                    AppendCurveKeys(Curve, TrackObj);
+                }
+            }
+            Tracks.Add(MakeShared<FJsonValueObject>(TrackObj));
+        };
+        for (const FTTFloatTrack& Track : Timeline->FloatTracks)
+        {
+            AddTrack(Track.GetTrackName(), TEXT("float"), Track.CurveFloat.Get());
+        }
+        for (const FTTVectorTrack& Track : Timeline->VectorTracks)
+        {
+            AddTrack(Track.GetTrackName(), TEXT("vector"), Track.CurveVector.Get());
+        }
+        for (const FTTLinearColorTrack& Track : Timeline->LinearColorTracks)
+        {
+            AddTrack(Track.GetTrackName(), TEXT("linear_color"), Track.CurveLinearColor.Get());
+        }
+        for (const FTTEventTrack& Track : Timeline->EventTracks)
+        {
+            AddTrack(Track.GetTrackName(), TEXT("event"), Track.CurveKeys.Get());
+        }
+        if (Tracks.Num() > 0)
+        {
+            TimelineObj->SetArrayField(TEXT("tracks"), Tracks);
+        }
+        Timelines.Add(MakeShared<FJsonValueObject>(TimelineObj));
+    }
+    if (Timelines.Num() > 0)
+    {
+        Data->SetArrayField(TEXT("timelines"), Timelines);
+    }
+
+    // --- Collapsed / nested sub-graphs ---
+    // Reachable by name via bp_describe_graph, but previously undiscoverable:
+    // no listing anywhere mentioned they existed.
+    {
+        TArray<TSharedPtr<FJsonValue>> SubGraphs;
+        TFunction<void(UEdGraph*, const FString&)> CollectSubGraphs =
+            [&SubGraphs, &CollectSubGraphs](UEdGraph* Parent, const FString& ParentName)
+        {
+            if (!Parent)
+            {
+                return;
+            }
+            for (UEdGraph* Child : Parent->SubGraphs)
+            {
+                if (!Child)
+                {
+                    continue;
+                }
+                TSharedPtr<FJsonObject> SubObj = MakeShared<FJsonObject>();
+                SubObj->SetStringField(TEXT("name"), Child->GetName());
+                SubObj->SetNumberField(TEXT("node_count"), Child->Nodes.Num());
+                SubObj->SetStringField(TEXT("parent_graph"), ParentName);
+                SubGraphs.Add(MakeShared<FJsonValueObject>(SubObj));
+                CollectSubGraphs(Child, Child->GetName());
+            }
+        };
+
+        for (const TArray<TObjectPtr<UEdGraph>>* GraphList :
+             { &BP->UbergraphPages, &BP->FunctionGraphs, &BP->MacroGraphs, &BP->DelegateSignatureGraphs })
+        {
+            for (UEdGraph* Graph : *GraphList)
+            {
+                if (Graph)
+                {
+                    CollectSubGraphs(Graph, Graph->GetName());
+                }
+            }
+        }
+        if (SubGraphs.Num() > 0)
+        {
+            Data->SetArrayField(TEXT("sub_graphs"), SubGraphs);
+        }
     }
 
     // --- 组件列表 (含层级关系) ---
@@ -2322,6 +2974,11 @@ TSharedPtr<FJsonObject> FSmithUEBlueprintCommands::HandleBpDescribeGraph(const T
     FString Mode = TEXT("full");
     Params->TryGetStringField(TEXT("mode"), Mode);
 
+    // Node-class-specific references (FunctionReference / VariableReference /
+    // property paths / cast targets). On by default except in "summary" mode.
+    bool bIncludeRefs = (Mode != TEXT("summary"));
+    Params->TryGetBoolField(TEXT("include_refs"), bIncludeRefs);
+
     // node_ids param for "node_pins" mode
     TSet<FString> NodeIdsFilter;
     if (Mode == TEXT("node_pins"))
@@ -2474,6 +3131,48 @@ TSharedPtr<FJsonObject> FSmithUEBlueprintCommands::HandleBpDescribeGraph(const T
         return FString::Printf(TEXT("%s.%s"), **ShortId, *LinkedPin->PinName.ToString());
     };
 
+    // Helper: annotate a pin with the structural flags that change how it must be
+    // read (split struct pins, orphans left over from signature changes, hidden /
+    // advanced pins, and UI names that differ from the internal name).
+    auto AnnotatePin = [](const UEdGraphPin* Pin, const TSharedPtr<FJsonObject>& PinObj)
+    {
+        if (Pin->ParentPin)
+        {
+            // Split struct pin: the value lives on the sub-pins, not the parent.
+            PinObj->SetStringField(TEXT("parent"), Pin->ParentPin->PinName.ToString());
+        }
+        if (Pin->SubPins.Num() > 0)
+        {
+            TArray<TSharedPtr<FJsonValue>> SubNames;
+            for (const UEdGraphPin* SubPin : Pin->SubPins)
+            {
+                if (SubPin)
+                {
+                    SubNames.Add(MakeShared<FJsonValueString>(SubPin->PinName.ToString()));
+                }
+            }
+            PinObj->SetArrayField(TEXT("split_into"), SubNames);
+        }
+        if (Pin->bOrphanedPin)
+        {
+            // Left behind by a signature change -- almost always a real defect.
+            PinObj->SetBoolField(TEXT("orphaned"), true);
+        }
+        if (Pin->bHidden)
+        {
+            PinObj->SetBoolField(TEXT("hidden"), true);
+        }
+        if (Pin->bAdvancedView)
+        {
+            PinObj->SetBoolField(TEXT("advanced"), true);
+        }
+        const FString Friendly = Pin->PinFriendlyName.ToString();
+        if (!Friendly.IsEmpty() && Friendly != Pin->PinName.ToString())
+        {
+            PinObj->SetStringField(TEXT("label"), Friendly);
+        }
+    };
+
     // Helper: build full pin arrays for a node (shared by "full" and "node_pins" modes)
     auto BuildPinArrays = [&](UEdGraphNode* Node,
                                TArray<TSharedPtr<FJsonValue>>& Inputs,
@@ -2494,7 +3193,10 @@ TSharedPtr<FJsonObject> FSmithUEBlueprintCommands::HandleBpDescribeGraph(const T
                 {
                     continue;
                 }
-                if (Pin->DefaultValue.IsEmpty() && Pin->LinkedTo.Num() == 0)
+                // A split struct pin carries no value of its own, but dropping it
+                // would orphan its sub-pins; orphaned pins are always worth showing.
+                if (Pin->DefaultValue.IsEmpty() && Pin->LinkedTo.Num() == 0 &&
+                    Pin->SubPins.Num() == 0 && !Pin->bOrphanedPin)
                 {
                     continue;
                 }
@@ -2535,6 +3237,7 @@ TSharedPtr<FJsonObject> FSmithUEBlueprintCommands::HandleBpDescribeGraph(const T
                     }
                 }
 
+                AnnotatePin(Pin, PinObj);
                 Inputs.Add(MakeShared<FJsonValueObject>(PinObj));
             }
             else // Output
@@ -2560,6 +3263,7 @@ TSharedPtr<FJsonObject> FSmithUEBlueprintCommands::HandleBpDescribeGraph(const T
                 {
                     PinObj->SetArrayField(TEXT("to"), Conns);
                 }
+                AnnotatePin(Pin, PinObj);
                 Outputs.Add(MakeShared<FJsonValueObject>(PinObj));
             }
         }
@@ -2598,6 +3302,18 @@ TSharedPtr<FJsonObject> FSmithUEBlueprintCommands::HandleBpDescribeGraph(const T
         NodeObj->SetStringField(TEXT("title"), Node->GetNodeTitle(ENodeTitleType::ListView).ToString());
         NodeObj->SetNumberField(TEXT("pos_x"), Node->NodePosX);
         NodeObj->SetNumberField(TEXT("pos_y"), Node->NodePosY);
+        AppendNodeState(Node, NodeObj);
+
+        // Node-class-specific references (called function, read variable/property
+        // path, cast target, ...). Omitted when the node has nothing beyond the
+        // generic UEdGraphNode surface.
+        if (bIncludeRefs)
+        {
+            if (TSharedPtr<FJsonObject> Refs = BuildNodeRefs(Node))
+            {
+                NodeObj->SetObjectField(TEXT("refs"), Refs);
+            }
+        }
 
         // summary mode: no pins
         if (Mode != TEXT("summary"))
@@ -3298,6 +4014,13 @@ TSharedPtr<FJsonObject> FSmithUEBlueprintCommands::HandleBpSearch(const TSharedP
                 Pos->SetNumberField(TEXT("y"), Node->NodePosY);
                 return Pos;
             }());
+            AppendNodeState(Node, NodeObj);
+
+            // Node-class-specific references (called function, read variable, ...).
+            if (TSharedPtr<FJsonObject> Refs = BuildNodeRefs(Node))
+            {
+                NodeObj->SetObjectField(TEXT("refs"), Refs);
+            }
 
             // --- Verbose: include pins ---
             if (bVerbose)

@@ -116,7 +116,7 @@ SmithUE UE5 插件 (HTTP :动态端口)
 
 ## 命令参考
 
-SmithUE 提供了分布在 **27 个功能域** 中的 **301 个工具**。命令集正在持续扩展。请使用 `npx smithue-cli list` 查看最新可用命令，或参阅 [TOOLS.md](TOOLS.md) 获取完整参考。
+SmithUE 提供了分布在 **29 个功能域** 中的 **314 个工具**。命令集正在持续扩展。请使用 `npx smithue-cli list` 查看最新可用命令，或参阅 [TOOLS.md](TOOLS.md) 获取完整参考。
 
 ### 功能域概览
 
@@ -199,7 +199,7 @@ npx smithue-cli exec generate_texture '{"params":{"prompt":"seamless stylized st
 - **节点防重叠 + 自动布局**：Material/MaterialFunction/PCG/Blueprint 新建节点自动错开；`auto_layout_graph` 新增 PCG 分支；`get_material_info` 返回连线 `edges`。
 - **5.8 新材质系统 Substrate**：可创建 `SubstrateSlabBSDF` 等节点，`connect_material_pins` 支持 `dest_input_index=8`（FrontMaterial）。
 - **修复**：Niagara emitter 模板路径（5.8）、DataTable 多行追加、`level_save` 支持 `level_path` 免弹框另存。
-- 共 **301 工具 / 29 域**。
+- 共 **314 工具 / 29 域**。
 
 ### v1.13.0（UE5.2，2026-06-26）
 - **SKILL 漂移检测**：每次环境探针后对比本地已部署 `smithue-control/SKILL.md` 与已安装 CLI 自带 bundle，结果写入 `LogSmithUE`（Unknown / NotDeployed / Stale / Synced）。

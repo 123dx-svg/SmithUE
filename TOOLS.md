@@ -1,6 +1,6 @@
 # SmithUE Tools Reference
 
-> Generated from `/api/v1/tools`. Total: **301 tools** across **29 domains**.
+> Generated from `/api/v1/tools`. Total: **314 tools** across **29 domains**.
 
 ---
 
@@ -471,6 +471,133 @@ Move an asset to a new path (different folder and/or name). Updates all referenc
 - `asset_path` (string, required): Current full asset path
 - `new_path` (string, required): New full asset path (e.g. /Game/NewFolder/NewName)
 
+### `move_folder`
+
+Move all assets under a content folder (recursive) to another mount point/folder, preserving relative structure. Uses batched IAssetTools::RenameAssets, which updates all references and leaves redirectors. Supports dry_run.
+
+**Parameters:**
+
+- `source_folder` (string, required): Source content folder (e.g. /Game/UltraDynamicSky)
+- `dest_folder` (string, required): Destination content folder (e.g. /UltraDynamicSky). Mount point must exist.
+- `dry_run` (boolean): Preview the rename plan without applying (default: false)
+- `save` (boolean): Save all dirty packages after moving (default: true)
+
+### `get_dependency_closure`
+
+Compute the full recursive dependency closure of one or more root assets, restricted to a content prefix (default /Game). Returns every dependency package plus a 'shared' flag for those still referenced by packages OUTSIDE the closure (i.e. would break other content if migrated). Read-only. Use before migrating a map's dependencies into a plugin.
+
+**Parameters:**
+
+- `root_assets` (array, required): Root asset/object paths (e.g. ["/Plugin/Maps/MyLevel"])
+- `content_prefix` (string): Only follow/collect dependencies under this prefix (default /Game)
+- `max_list` (number): Cap the returned package/shared lists (counts are always exact; default 1000)
+
+### `move_paths`
+
+Batch-move an explicit list of asset packages to a destination root, remapping strip_prefix->dest_root (e.g. /Game/Building/X -> /SOBSJunction3/Building/X). Uses one batched IAssetTools::RenameAssets (updates references, leaves redirectors). Pair with get_dependency_closure to migrate a map's whole dependency set. Batch renames of Blueprints can raise CDO-reference confirm modals: arm set_dialog_auto_response mode=confirm first. Supports dry_run.
+
+**Parameters:**
+
+- `paths` (array, required): Asset/package paths to move (e.g. ["/Game/Building/SM_X"])
+- `dest_root` (string, required): Destination mount/root (e.g. /SOBSJunction3). Must be a mounted content root.
+- `strip_prefix` (string): Prefix stripped from each source path before prepending dest_root (default /Game)
+- `dry_run` (boolean): Preview the remap plan without applying (default false)
+- `save` (boolean): Save all dirty packages after moving (default true)
+
+### `fixup_redirectors`
+
+Clean up ObjectRedirectors under a folder (recursive). SAFE DEFAULT: only deletes redirectors that have NO external referencers (the normal state after a folder migration, since references were already rewritten) - this avoids AssetTools::FixupReferencers, which ASSERTS/crashes on World & Blueprint-class/CDO redirectors left by migrated .umap packages. Redirectors that still have referencers are reported (not touched) unless force_fixup=true.
+
+**Parameters:**
+
+- `folder_path` (string, required): Content folder to scan for redirectors (e.g. /Game)
+- `force_fixup` (boolean): Run AssetTools::FixupReferencers over still-referenced redirectors (rewrites+saves referencers). Default false. UNSAFE for World/Blueprint redirectors - can crash the editor.
+
+### `resolve_redirectors`
+
+Resolve ObjectRedirectors under a folder by REWRITING every referencer (hard AND soft references) to point at the redirector's real target, then deleting the redirector. Uses ObjectTools::ConsolidateObjects per redirector - a DIFFERENT engine code path than fixup_redirectors/AssetTools::FixupReferencers (which asserts/crashes on some projects in UE5.8). Handles the soft-reference redirectors left after batch-migrating a map's dependencies. Saves modified packages.
+
+**Parameters:**
+
+- `folder_path` (string, required): Content folder to scan for redirectors (e.g. /Game)
+- `max_resolve` (number): Optional cap on how many redirectors to resolve this call (for batching very large sets; default: all)
+- `skip_poison` (boolean): Skip redirectors whose target is a World/level or Blueprint-generated class/CDO (ConsolidateObjects crashes on these in UE5.8). Default TRUE — they are reported in 'skipped_poison' instead of crashing the editor; use redirect_references + resave_packages for those.
+- `save` (boolean): Save modified packages after resolving (default true)
+
+### `resave_packages`
+
+Force-load and re-save every package under a folder (or an explicit list),固化引用: hard/soft references are rewritten to the CURRENT real path of the object they resolve to (following redirectors). This is the in-editor equivalent of the 'ResavePackages -fixupredirects' commandlet, but crucially WORKS ON PLUGIN packages (the commandlet's -projectonly / default scope skips plugins). Use after moving assets to固化 references held by plugin assets / FoliageTypes / levels so their /Game redirectors become unreferenced and deletable.
+
+**Parameters:**
+
+- `folder_path` (string): Content folder to resave recursively (e.g. /MyPlugin). Provide this OR paths.
+- `paths` (array): Explicit package/asset paths to resave. Provide this OR folder_path.
+- `skip_maps` (boolean): Skip World/level packages (default false). Levels are slower and may need the level to be opened; set true to resave only content assets.
+- `max` (number): Optional cap on packages processed this call (for batching very large sets)
+
+### `redirect_references`
+
+Explicitly rewrite references (hard AND soft) inside a set of referencer assets: every reference to from_asset is replaced with to_asset via FArchiveReplaceObjectRef, then the referencers are saved. Does NOT use AssetTools::FixupReferencers / ObjectTools::ConsolidateObjects (both crash on World/Blueprint/CDO redirectors in UE5.8). Use to surgically re-point stubborn references (e.g. a level actor still pointing at a /Game BP redirector) at the real asset in the plugin.
+
+**Parameters:**
+
+- `referencers` (array, required): Asset paths whose references should be rewritten (e.g. the level / FoliageType / material holding the stale ref)
+- `from_asset` (string, required): The asset currently referenced (usually a redirector or old path)
+- `to_asset` (string, required): The real asset the references should point at
+- `save` (boolean): Save modified referencers afterwards (default true)
+
+### `plan_migration`
+
+DRY-RUN migration preview. Given a source folder + destination root remap, reports BEFORE moving anything: how many packages would move, how many redirectors that leaves, and — most importantly — classifies each mover's external referencers as auto-fixable (plain asset refs) vs STUBBORN (World/level actor refs & Blueprint-class refs that the engine cannot auto-固化, i.e. will leave hard-to-clean redirectors). Also lists shared assets (referenced from outside the move set). Lets you see the redirector/breakage cost before committing.
+
+**Parameters:**
+
+- `source_folder` (string, required): Folder whose assets would be moved (e.g. /MyPlugin/Building)
+- `dest_root` (string, required): Destination root (e.g. /MyPlugin/Shared)
+- `strip_prefix` (string): Prefix stripped before prepending dest_root (default = source_folder's mount, e.g. /MyPlugin)
+- `max_list` (number): Cap on sample lists returned (counts are exact; default 50)
+
+### `list_redirectors`
+
+Diagnose ObjectRedirectors under a folder: classifies each by referencer origin (none = safe to delete; plugin/game refs = need resave_packages/redirect_references to固化 first) and by kind (asset / World / Blueprint-class / CDO — the last two are ConsolidateObjects 'poison'). Read-only. Use to pick the right cleanup path before touching anything.
+
+**Parameters:**
+
+- `folder_path` (string, required): Content folder to scan (e.g. /MyPlugin)
+- `max_list` (number): Cap on per-bucket sample lists (counts are exact; default 30)
+
+### `move_folders`
+
+Batch several folder moves in ONE call (each {source, dest}), instead of calling move_folder N times. Uses a single batched IAssetTools::RenameAssets across all mappings so cross-folder references between the moved sets are fixed up together (fewer leftover redirectors than sequential move_folder). Supports dry_run.
+
+**Parameters:**
+
+- `mappings` (array, required): Array of {"source":"/P/A","dest":"/P/Shared/A"} objects
+- `dry_run` (boolean): Preview only (default false)
+- `save` (boolean): Save dirty packages afterwards (default true)
+
+### `delete_empty_folders`
+
+Delete empty content folders (no assets in the folder or any subfolder) on disk under a root, recursively bottom-up. Safe: empty folders hold nothing and break nothing. Use to tidy up the source tree left behind after migrating assets out.
+
+**Parameters:**
+
+- `root` (string, required): Content root to clean (e.g. /Game or /MyPlugin)
+- `dry_run` (boolean): List what would be deleted without deleting (default false)
+
+### `get_job_status`
+
+Report live progress of the current long-running batch command (resave_packages / move_folder(s) / fixup_redirectors / resolve_redirectors). WORKER-SAFE: responds even while the game thread is busy inside the batch, so you can poll真实进度 instead of grepping the log. Returns active/operation/processed/total/percent/current_item/elapsed_seconds.
+
+### `consolidate_assets`
+
+Consolidate assets: replace all references to assets_to_merge with asset_to_keep, then delete the merged assets (same as Content Browser 'Replace References'). All assets must be of compatible classes.
+
+**Parameters:**
+
+- `asset_to_keep` (string, required): Asset path that references will point to after consolidation
+- `assets_to_merge` (array, required): Array of asset paths to be replaced by asset_to_keep and deleted
+
 ### `asset_editor`
 
 Open or close asset editors. Supports single or multiple assets.
@@ -633,7 +760,7 @@ Create a node inside a Blueprint graph (in-graph: adds a node inside a Blueprint
 - `graph_name` (string, required): Target graph name
 - `node_class` (string, required): Node class name
 - `position` (object): Optional {x,y} node position
-- `function_name` (string): Function name or 'ClassName::FunctionName' for K2Node_CallFunction nodes
+- `function_name` (string): Function name or 'ClassName::FunctionName' for K2Node_CallFunction nodes. Omit for self-configuring subclasses that already set their own function (e.g. K2Node_GetEditorProperty).
 - `variable_name` (string): Variable name for K2Node_VariableGet or K2Node_VariableSet nodes
 - `macro_path` (string): Macro graph asset path for K2Node_MacroInstance nodes
 - `key` (string): Input key name (e.g. 'W', 'Gamepad_LeftX') for K2Node_InputKey nodes
@@ -1040,11 +1167,12 @@ Fix stale local variable scope references in all function graphs (use after bp_r
 
 ### `bp_get_summary`
 
-Get Blueprint metadata summary
+Get Blueprint metadata summary: parent class, compile status, interfaces, variables (type, category, CDO default value, editable/read_only/replicated/transient/save_game/config/expose_on_spawn flags), functions (signature + local variables), macros, event graphs, custom events, input bindings, event dispatchers, timelines (tracks + curve assets + inlined keyframes), collapsed sub_graphs and components.
 
 **Parameters:**
 
 - `bp_path` (string, required): Blueprint asset path, or 'level:current' / 'level:/Game/Maps/MyMap' for Level Blueprints
+- `include_curve_keys` (boolean): Inline Timeline curve keyframes (t/v/interp). Default true. Blueprint-embedded curves are not reachable by read_curve, so this is the only way to see them.
 
 ### `bp_get_component_details`
 
@@ -1104,13 +1232,14 @@ Trace data-flow upstream or downstream from a node data pin in a Blueprint graph
 
 ### `bp_describe_graph`
 
-Describe nodes in a Blueprint graph. mode: full(default)/compact/summary/node_pins/exec_chain. exec_chain mode follows exec pins from entry points (add entry_node param to start from specific N-id).
+Describe nodes in a Blueprint graph. mode: full(default)/compact/summary/node_pins/exec_chain. exec_chain mode follows exec pins from entry points (add entry_node param to start from specific N-id). Each node also carries a 'refs' object with the node-class-specific references it holds (FunctionReference, VariableReference, component template assets, bound graph names, cast target class, ...), plus state fields when set: 'enabled' (disabled/development_only), 'comment', 'error', and 'size' for comment boxes. Pins are annotated with 'parent'/'split_into' (split struct pins -- the parent's default is stale, read the sub-pins), 'orphaned', 'hidden', 'advanced' and 'label'.
 
 **Parameters:**
 
 - `bp_path` (string, required): Blueprint asset path, or 'level:current' / 'level:/Game/Maps/MyMap' for Level Blueprints
 - `graph_name` (string, required): Graph name
 - `entry_node` (string): For exec_chain mode: N-id to start BFS from (default: all entry points)
+- `include_refs` (boolean): Include the per-node 'refs' object of referenced functions/variables/properties. Default true (false in summary mode).
 
 ### `bp_compile_code`
 
@@ -1141,7 +1270,7 @@ Validate the limited Blueprint FUNCTION-graph DSL syntax (read-only, no mutation
 
 ### `bp_search`
 
-Search nodes in a Blueprint by name (substring, case-insensitive) and/or type (exact class name). Searches all graphs (event, function, macro).
+Search nodes in a Blueprint by name (substring, case-insensitive) and/or type (exact class name). Searches all graphs (event, function, macro). Matched nodes include a 'refs' object with their node-class-specific references (called function, read variable/property, cast target, ...).
 
 **Parameters:**
 
@@ -1166,11 +1295,11 @@ Create a curve asset (Float, LinearColor, or Vector) with optional keyframes
 
 ### `read_curve`
 
-Read a curve asset's type and keyframes
+Read a curve's type and keyframes. Accepts a curve asset path, or a Blueprint-embedded Timeline curve sub-object path (e.g. /Game/Foo/BP_Bar.BP_Bar_C:CurveFloat_0, as reported by bp_get_summary timelines[].tracks[].curve).
 
 **Parameters:**
 
-- `curve_path` (string, required): Curve asset path
+- `curve_path` (string, required): Curve asset path, or Package.Object:SubObject path for a Blueprint-embedded Timeline curve
 
 ### `create_curve_atlas`
 
@@ -1310,11 +1439,12 @@ Report whether a blocking modal editor dialog is currently open (title/type), th
 
 ### `dismiss_active_dialog`
 
-Close a modal editor dialog that is blocking the game thread (e.g. an unexpected 'Save As'/confirm prompt). WORKER-SAFE. success = QUEUED, not finished: the close is applied on the next modal-loop tick; poll get_active_dialog (modal_active=false) to confirm. response=cancel (default) reliably destroys/closes the window; response=accept is BEST-EFFORT (focus + Enter = default action) and falls back to close if Enter does not dismiss it.
+Close a modal editor dialog that is blocking the game thread (e.g. an unexpected 'Save As'/confirm prompt). WORKER-SAFE. success = QUEUED, not finished: the close is applied on the next modal-loop tick; poll get_active_dialog (modal_active=false) to confirm. button_text clicks a SPECIFIC button by its label (case-insensitive; exact then substring; check get_active_dialog 'buttons') — use this for dialogs whose default button is NOT the one you want (e.g. OkCancel confirms that default to Cancel). response=cancel (default) reliably destroys/closes the window; response=accept is BEST-EFFORT (focus + Enter = default action) and falls back to close if Enter does not dismiss it.
 
 **Parameters:**
 
-- `response` (string): How to respond: 'cancel' (default, reliably closes) or 'accept' (best-effort default action)
+- `response` (string): How to respond: 'cancel' (default, reliably closes) or 'accept' (best-effort default action). Ignored when button_text is provided.
+- `button_text` (string): Click the button whose label matches this text (case-insensitive; exact match preferred, then substring). See get_active_dialog 'buttons' for available labels.
 
 ### `set_dialog_auto_response`
 

@@ -1,5 +1,125 @@
 # SmithUE Changelog
 
+## v1.16.3（UE5.8，2026-08-31）
+
+### 修复：只能读到节点自身信息，读不到节点"引用了什么"
+此前 `bp_describe_graph` / `bp_search` 只序列化 `UEdGraphNode` 的通用表面（class / title / 位置 / 引脚），
+节点类自己的 UPROPERTY 全部丢失 —— 于是 `K2Node_CallFunction` 看不到调用了哪个函数、
+`K2Node_VariableGet` 看不到读的是哪个变量、`K2Node_MacroInstance` 看不到宏来自哪个蓝图、
+PropertyAccess 类节点（`K2Node_GetEditorProperty`/`SetEditorProperty`，均派生自 `K2Node_CallFunction`）
+也拿不到其引用属性。只能靠 `title` 猜。
+
+- **新增每节点 `refs` 对象**（`SmithUEBlueprintCommands.cpp`）：通过反射遍历节点类中**声明在 `UEdGraphNode` 之下**的
+  属性，只导出与 CDO 不同的"引用型"值。**无需按节点类逐个特判**，新节点类型自动覆盖，也不新增模块依赖。
+  - `FMemberReference` 展开为 `{member_name, member_parent, self}` → `FunctionReference` / `VariableReference` /
+    `MacroGraphReference` 等一次性全覆盖。
+  - 对象/类引用、`FSoftObjectPath`/`FSoftClassPath` 输出路径；FName/FString/FText/枚举/bool 直出。
+  - 数组、Set、**TMap** 递归；未识别的结构体递归取其引用型字段（AnimGraph 的 `PropertyBindings`
+    即 `TMap<FName, FAnimGraphNodePropertyBinding>`，由此免 AnimGraph 模块依赖地浮出）。
+  - 节点自持的子对象（如 `AnimGraphNodeBinding`）递归展开，而不是打印无意义的内部对象路径。
+- **噪声控制**（否则 AnimGraph 节点会灌爆输出）：跳过 `CPF_Transient` / `CPF_Deprecated`；跳过引脚可见性元数据
+  `FOptionalPinFromProperty`（信息已由引脚列表表达）；嵌套层级（depth ≥ 1）只保留真正的引用型叶子，
+  丢弃 bool/枚举/数值这类设置项；递归深度上限 4，字符串上限 512。值等于 CDO 默认值即跳过，
+  因此 `refs` 为空时整个字段省略，token 成本接近 0。
+- **`bp_describe_graph` 新增 `include_refs` 参数**（默认 true，`summary` 模式默认 false）。
+- `bp_search` 的匹配节点同样带 `refs`。
+- **`K2Node_AddComponent` 的组件模板**：其资产引用不在节点上，而在蓝图 CDO 的组件模板里（节点只存
+  `TemplateName`），改为解析 `GetTemplateFromNode()` 并输出 `refs.component_template`
+  → 例如 `{"StaticMesh":"/Game/Vehicles/SportsCar/SM_SportsCar_Wheel"}`。此前只能从 title 字符串里猜。
+- **CDO 里就设好的引用不再被过滤**：`FMemberReference` 属性豁免"等于默认值即跳过"规则 ——
+  `K2Node_GetEditorProperty`/`SetEditorProperty` 在构造函数里就写死了 `FunctionReference`，
+  否则恰恰是要查的那个字段被吞掉。
+
+### 已知限制（未改）
+- `bp_create_node` 对 `UK2Node_CallFunction` 的**所有子类**都强制要求 `function_name`，
+  但自配置型子类（`K2Node_GetEditorProperty` 等）构造函数里已设好 `FunctionReference`，
+  不传就返回 "Failed to create node"。**已在本版修复**（见下）。
+
+### 修复：`bp_create_node` 拒绝自配置型 CallFunction 子类
+`SmithUEBpAtomicAPI.cpp` `CreateNode`：`function_name` 改为**可选** —— 仅当未提供且
+`FunctionReference` 也为空时才失败。`K2Node_GetEditorProperty` / `K2Node_SetEditorProperty`
+等在构造函数里 `SetExternalMember` 的子类现在可直接创建。
+
+### 修复：一批蓝图**读取盲区**（深度审计产物）
+`bp_describe_graph` / `bp_search` 之前只输出 class/title/位置/引脚基本信息，
+下列会**改变逻辑解读结论**的信息全部缺失：
+
+- **节点状态**（此前被 `refs` 的"跳过 UEdGraphNode 基类"规则连带滤掉）：
+  - `enabled`：`disabled` / `development_only` —— 被禁用的节点不参与运行，
+    此前会被当成生效节点读，结论直接错。
+  - `comment`：节点注释气泡文字（作者意图的唯一记录）。
+  - `error`：`bHasCompilerMessage` + `ErrorMsg`，有编译报错的节点此前完全看不出。
+  - `size`：注释框（`EdGraphNode_Comment`）的 `NodeWidth/NodeHeight` ——
+    注释框靠几何范围分组节点，没有尺寸就无法判断哪些节点属于哪个分组。
+- **引脚结构标记**：
+  - `parent` / `split_into`：**拆分结构体引脚**。此前父引脚显示一个**过期的** default
+    （实测 Ultra_Dynamic_Weather 里父引脚 `A` 报 `1800,0,0`，真值其实来自
+    `A_X ← N10.ReturnValue`），且父引脚在 compact 模式被当作"无默认值无连线"整个丢弃，
+    数据流直接断链。现在父引脚不再被 compact 丢弃，并标出拆分关系。
+  - `orphaned`：函数签名变更后遗留的孤儿引脚 —— 排故关键，且不再被 compact 过滤。
+  - `hidden` / `advanced`：此前 full 模式把隐藏引脚和普通引脚混在一起无从区分。
+  - `label`：`PinFriendlyName`（UI 名 ≠ 内部名，如 `bAlphaBoolEnabled` → "bEnabled"）。
+- **图引用**：`refs` 中的 `UEdGraph*` 属性（`K2Node_Composite::BoundGraph` 等）
+  改为输出**图名**，可直接拿去 `bp_describe_graph` 下钻；此前会递归进该图的所有节点产生垃圾输出。
+
+实测（Ultra_Dynamic_Weather，306 图 / 6387 节点）：89% 节点带 `refs`，
+命中 110 个注释框、8 个拆分引脚、3032 个隐藏引脚、211 个高级引脚、5068 个 UI 别名。
+
+### 仍未修（已确认存在，待后续）
+- 无。上一轮列出的 4 项已在本版全部修复（见下）。
+
+### 修复：`bp_get_summary` 的四类资产级读取盲区
+- **变量默认值 / 分类 / 完整标志位**：此前变量只有 `name` + `type` + `read_only`/`replicated`，
+  读不到任何配置值。现在补 `default`（**从 GeneratedClass CDO 反射导出**，而不是用
+  `FBPVariableDescription::DefaultValue` —— 后者只对简单字面量有效，结构体/对象类型会过期）、
+  `category`（用 `UEdGraphSchema_K2::VR_DefaultCategory` 比较，避免中文本地化的"默认"漏判）、
+  以及 `editable`/`transient`/`save_game`/`config`/`expose_on_spawn`。
+  `()` 与 `None` 视为未设置直接省略，控制 token。
+- **函数图局部变量**：`UK2Node_FunctionEntry::LocalVariables` 此前在任何工具里都不可见，
+  现在作为函数条目的 `locals` 输出（与变量同结构）。
+- **Timeline**：Timeline 不是 `UEdGraph`，因此从来不出现在任何图列表里。
+  新增 `timelines`：`name` / `length` / `auto_play` / `loop` / `replicated` /
+  `tracks`（float / vector / linear_color / event 四类轨道 + 各自的曲线资产路径）。
+- **折叠子图**：递归遍历所有 Ubergraph / Function / Macro / Delegate 图的 `SubGraphs`，
+  输出 `sub_graphs`（`name` / `node_count` / `parent_graph`）。此前虽可按名 `bp_describe_graph`
+  下钻，但**没有任何地方告诉你它存在**。
+
+实测（全工程 100 个蓝图 / 94 个成功解析）：
+1849 个变量中 **1506 个吐出默认值**、1636 个带分类、15 个 `expose_on_spawn`、77 个 `replicated`；
+1108 个函数中 **196 个含局部变量，共 626 个**；命中 1 个折叠子图
+（`Offroad_CtrlRig :: SequenceAggregate_SubGraph`）。改前这些数字全为 0。
+Timeline 用 `bp_add_timeline` 现场建了一个验证读取（`{"name":"FadeTimeline","length":5}`）。
+
+### 修复：Timeline 曲线关键帧读不到（黑盒）
+Timeline 的曲线通常是**内嵌在蓝图里的对象**（`/Game/…/BP_Test.BP_Test_C:CurveFloat_0`）
+而非独立资产，`UEditorAssetLibrary::LoadAsset` 解析不到 → `read_curve` 直接报
+"Curve not found"。结果是只知道"有一条 float 轨道"，**它到底怎么插值、数值怎么变完全不可见**。
+
+- **`bp_get_summary` 内联关键帧**：每条 track 增加 `keys`，含 `t` / `v` / `interp`
+  （`constant` / `linear` / `cubic_auto` / `cubic_user` / `cubic_break`），
+  cubic 且切线非零时附 `arrive` / `leave`。vector 轨道按 `{x,y,z}` 分量、
+  linear_color 按 `{r,g,b,a}` 分组。单曲线上限 64 个 key。
+  新增 `include_curve_keys` 参数（默认 true）。
+- **`read_curve` 支持内嵌曲线**：`LoadAsset` 失败时回退
+  `LoadObject<UCurveBase>`，从而解析 `Package.Object:SubObject` 形式的路径 ——
+  即 `bp_get_summary` 里 `timelines[].tracks[].curve` 直接可拿去精读。
+
+实测（用户在 `BP_Test` 里手工添加的 Timeline）：
+```
+"timelines":[{"name":"时间轴","length":5,"auto_play":true,
+  "tracks":[{"name":"新建轨道_0","kind":"float",
+    "curve":"/Game/SimFramework/Test/BP_Test.BP_Test_C:CurveFloat_0",
+    "keys":[{"t":0,"v":0,"interp":"cubic_auto"},
+            {"t":1,"v":0.3290833,"interp":"cubic_auto"}]}]}]
+```
+同一路径喂给 `read_curve` 也已可读（改前报 "Curve not found"）。
+该样本同时补测了上一轮标注为"未实测命中"的三条：`tracks`、节点 `enabled:"disabled"`、
+节点 `comment`（用户禁用了两个事件节点）。
+
+### 文档
+- `TOOLS.md` 由 `/api/v1/tools` 重新生成（顺带修正此前遗留的漂移：301 → **314 工具 / 29 域**），
+  README / README.en / `.uplugin` 计数同步。
+
 ## v1.16.2（UE5.8，2026-07-28）
 
 ### 修复：SKILL 部署只拷了 SKILL.md，漏掉 reference/ 与 scripts/

@@ -93,7 +93,7 @@ Unreal Engine 5.8 Editor
 
 ## Command Reference
 
-SmithUE provides **301 tools** organized across **27 functional domains**. The command set is continuously growing. Use `npx smithue-cli list` to see the latest available commands, or refer to [TOOLS.md](TOOLS.md) for the full reference.
+SmithUE provides **314 tools** organized across **29 functional domains**. The command set is continuously growing. Use `npx smithue-cli list` to see the latest available commands, or refer to [TOOLS.md](TOOLS.md) for the full reference.
 
 ### Domain Overview
 
@@ -179,7 +179,7 @@ npx smithue-cli exec generate_texture '{"params":{"prompt":"seamless stylized st
 - **Anti-overlap node placement + auto-layout**: Material/MaterialFunction/PCG/Blueprint nodes auto-cascade on create; `auto_layout_graph` gains a PCG branch; `get_material_info` returns wiring `edges`.
 - **UE5.8 Substrate**: can create `SubstrateSlabBSDF` etc.; `connect_material_pins` supports `dest_input_index=8` (FrontMaterial).
 - **Fixes**: Niagara emitter template path (5.8), DataTable multi-row append, `level_save` `level_path` for dialog-free Save-As.
-- **301 tools / 29 domains** total.
+- **314 tools / 29 domains** total.
 
 ### v1.15.0 (UE5.2, 2026-07-03)
 - **AnimGraph editing tools**: added 8 tools for anim-node property edits, optional pin exposure, member-variable bindings, anim-node reads, and state-machine / state / transition authoring with state-machine read-back.

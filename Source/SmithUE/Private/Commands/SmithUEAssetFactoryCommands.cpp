@@ -120,8 +120,8 @@ void FSmithUEAssetFactoryCommands::RegisterTools(FSmithUEToolRegistry& Registry)
 
     Registry.Register(
         FSmithUEToolSchema(TEXT("read_curve"), TEXT("Curve"),
-            TEXT("Read a curve asset's type and keyframes"),
-            { FSmithUEToolParam(TEXT("curve_path"), TEXT("string"), TEXT("Curve asset path"), true) }),
+            TEXT("Read a curve's type and keyframes. Accepts a curve asset path, or a Blueprint-embedded Timeline curve sub-object path (e.g. /Game/Foo/BP_Bar.BP_Bar_C:CurveFloat_0, as reported by bp_get_summary timelines[].tracks[].curve)."),
+            { FSmithUEToolParam(TEXT("curve_path"), TEXT("string"), TEXT("Curve asset path, or Package.Object:SubObject path for a Blueprint-embedded Timeline curve"), true) }),
         &HandleReadCurve);
 
     Registry.Register(
@@ -304,6 +304,13 @@ TSharedPtr<FJsonObject> FSmithUEAssetFactoryCommands::HandleReadCurve(const TSha
     Params->TryGetStringField(TEXT("curve_path"), CurvePath);
 
     UObject* Asset = UEditorAssetLibrary::LoadAsset(CurvePath);
+    if (!Asset)
+    {
+        // Timeline curves live INSIDE a Blueprint
+        // (/Game/Foo/BP_Bar.BP_Bar_C:CurveFloat_0) and are not assets, so
+        // LoadAsset cannot see them -- resolve the sub-object directly.
+        Asset = LoadObject<UCurveBase>(nullptr, *CurvePath);
+    }
     if (!Asset) { return FSmithUECommonUtils::CreateErrorResponse(FString::Printf(TEXT("Curve not found: %s"), *CurvePath)); }
 
     TSharedPtr<FJsonObject> Data = MakeShared<FJsonObject>();
