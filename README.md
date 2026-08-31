@@ -2,9 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-SmithUE is a high-performance Unreal Engine editor plugin designed to bridge the gap between creative intent and engine execution. It provides a robust command-driven interface that allows external tools and AI agents to manipulate the Unreal Editor directly, bypassing the need for manual menu navigation and repetitive Blueprint wiring. By exposing the engine's internal capabilities through a structured protocol, it empowers developers to automate tedious editor tasks and build intelligent co-pilot systems.
-
-SmithUE 是一款高性能虚幻引擎编辑器插件, 旨在搭建创意意图与引擎执行之间的桥梁. 它提供了一个强大的命令驱动接口, 允许外部工具和 AI 智能体直接操纵虚幻编辑器, 从而无需手动导航菜单和重复的蓝图连线. 通过结构化协议公开引擎内部功能, 它使开发人员能够自动化繁琐的编辑器任务, 并构建智能辅助驾驶系统.
+还没来得及做完！！！别用
 
 ---
 
