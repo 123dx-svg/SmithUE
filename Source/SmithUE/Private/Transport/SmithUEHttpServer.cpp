@@ -270,7 +270,7 @@ void USmithUEHttpServer::Initialize(FSubsystemCollectionBase& Collection)
 	// Priority 3 (lowest): Project Settings
 	if (SmithSettings)
 	{
-		Port = static_cast<uint16>(FMath::Clamp(SmithSettings->HttpBindPort, 1024, 65535));
+		Port = static_cast<uint16>(FMath::Clamp(SmithSettings->HttpBindPort, 0, 65535));
 	}
 
 	// Priority 2: SMITHUE_BIND_PORT environment variable override
@@ -278,7 +278,7 @@ void USmithUEHttpServer::Initialize(FSubsystemCollectionBase& Collection)
 	if (!EnvPort.IsEmpty())
 	{
 		int32 ParsedPort = FCString::Atoi(*EnvPort);
-		if (ParsedPort > 0 && ParsedPort <= MAX_uint16)
+		if (ParsedPort >= 0 && ParsedPort <= MAX_uint16 && EnvPort.IsNumeric())
 		{
 			Port = static_cast<uint16>(ParsedPort);
 		}
@@ -330,13 +330,20 @@ void USmithUEHttpServer::StartServer()
 		return;
 	}
 
-	NewListenerSocket->SetReuseAddr(true);
+	NewListenerSocket->SetReuseAddr(false);
 	NewListenerSocket->SetNonBlocking(true);
 
 	FIPv4Address Address;
 	FIPv4Address::Parse(TEXT("127.0.0.1"), Address);
 	const FIPv4Endpoint Endpoint(Address, Port);
-	if (!NewListenerSocket->Bind(*Endpoint.ToInternetAddr()) || !NewListenerSocket->Listen(5))
+	bool bBound = NewListenerSocket->Bind(*Endpoint.ToInternetAddr());
+	if (!bBound && Port != 0)
+	{
+		UE_LOG(LogSmithUE, Warning, TEXT("SmithUE port %d unavailable; allocating an independent port"), Port);
+		const FIPv4Endpoint AutomaticEndpoint(Address, 0);
+		bBound = NewListenerSocket->Bind(*AutomaticEndpoint.ToInternetAddr());
+	}
+	if (!bBound || !NewListenerSocket->Listen(5))
 	{
 		UE_LOG(LogSmithUE, Error, TEXT("Failed to bind/listen SmithUE HTTP server on 127.0.0.1:%d"), Port);
 		NewListenerSocket.Reset();

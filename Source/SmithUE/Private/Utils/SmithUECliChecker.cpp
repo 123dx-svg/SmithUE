@@ -1,9 +1,12 @@
 // Copyright 2026, 123dx-svg. MIT License.
 
 #include "Utils/SmithUECliChecker.h"
+#include "Utils/SmithUEMaintenanceLock.h"
 
 #include "HAL/PlatformProcess.h"
 #include "HAL/FileManager.h"
+#include "HAL/PlatformFileManager.h"
+#include "GenericPlatform/GenericPlatformFile.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 #include "Async/Async.h"
@@ -14,14 +17,13 @@
 #include "Widgets/Notifications/SNotificationList.h"
 
 #include "SmithUEModule.h"
+#include "SmithUESettings.h"
 
 // ---------------------------------------------------------------------------
 // Module-level constants and state (game-thread-confined writes, no lock)
 // ---------------------------------------------------------------------------
 
-// Minimum smithue-cli version the plugin recommends. BUMP THIS ON EVERY CLI
-// RELEASE: a higher floor makes machines with an older CLI show "Outdated → 升级",
-// and upgrading the CLI re-runs its postinstall which re-deploys the latest SKILL.
+// Compatibility floor; a newer registry version takes precedence.
 static constexpr TCHAR kRecommendedCliVersion[] = TEXT("0.13.4");
 
 /** Last known CLI environment state. Written only on the game thread. */
@@ -38,6 +40,10 @@ static FThreadSafeBool bInstallCancelRequested;
 
 /** Hard timeout for the install/upgrade subprocess (seconds). */
 static constexpr double kInstallTimeoutSeconds = 120.0;
+
+static FThreadSafeBool bNeverCancel;
+static constexpr double kRegistryQueryTimeoutSeconds = 20.0;
+static bool GAutoUpgradeAttempted = false;
 
 // Static member definition
 FOnCliCheckComplete FSmithUECliChecker::OnCliCheckComplete;
@@ -212,6 +218,33 @@ TOptional<FString> ParseNpmLsCliVersion(const FString& json)
     }
 
     return Version;
+}
+
+FString ResolveTargetCliVersion(const FString& Floor, const FString& NpmLatest)
+{
+    const TOptional<FSmithUESemver> FloorVer = ParseSemver(Floor);
+    const TOptional<FSmithUESemver> LatestVer = ParseSemver(NpmLatest);
+    if (!LatestVer.IsSet())
+    {
+        return FloorVer.IsSet() ? Floor : FString();
+    }
+    if (!FloorVer.IsSet())
+    {
+        return NpmLatest;
+    }
+    return CompareSemver(LatestVer.GetValue(), FloorVer.GetValue()) > 0 ? NpmLatest : Floor;
+}
+
+bool IsCliOutdated(const FString& Installed, const FString& Target)
+{
+    const TOptional<FSmithUESemver> TargetVer = ParseSemver(Target);
+    if (!TargetVer.IsSet())
+    {
+        return false;
+    }
+    const TOptional<FSmithUESemver> InstalledVer = ParseSemver(Installed);
+    return !InstalledVer.IsSet()
+        || CompareSemver(InstalledVer.GetValue(), TargetVer.GetValue()) < 0;
 }
 
 } // namespace SmithUECliInternal
@@ -478,12 +511,51 @@ ESkillState ComputeSkillState(const FString& NpmCliJs, FString& OutSourcePath)
         return ESkillState::NotDeployed;
     }
 
-    return BundleText.Equals(DeployedText, ESearchCase::CaseSensitive)
-        ? ESkillState::Synced
-        : ESkillState::Stale;
+    if (!BundleText.Equals(DeployedText, ESearchCase::CaseSensitive))
+    {
+        return ESkillState::Stale;
+    }
+
+    const FString BundleDir = FPaths::GetPath(Bundle);
+    const FString DeployedDir = FPaths::GetPath(Deployed);
+    for (const TCHAR* Sub : { TEXT("references"), TEXT("reference"), TEXT("scripts") })
+    {
+        if (IFileManager::Get().DirectoryExists(*(BundleDir / Sub))
+            && !IFileManager::Get().DirectoryExists(*(DeployedDir / Sub)))
+        {
+            return ESkillState::Stale;
+        }
+    }
+    if (IFileManager::Get().DirectoryExists(*(BundleDir / TEXT("references")))
+        && IFileManager::Get().DirectoryExists(*(DeployedDir / TEXT("reference"))))
+    {
+        return ESkillState::Stale;
+    }
+    return ESkillState::Synced;
 }
 
 } // anonymous namespace
+
+static void MaybeAutoUpgradeCli()
+{
+    const USmithUESettings* Settings = GetDefault<USmithUESettings>();
+    if (GAutoUpgradeAttempted || !Settings || !Settings->bAutoUpgradeCliOnStartup)
+    {
+        return;
+    }
+    const ECliState State = GCachedCliInfo.State;
+    if ((State != ECliState::Outdated && State != ECliState::NotInstalled)
+        || GCachedCliInfo.NpmVersion.IsEmpty())
+    {
+        return;
+    }
+
+    GAutoUpgradeAttempted = true;
+    UE_LOG(LogSmithUE, Log, TEXT("[SmithUE CLI] auto-upgrade: state=%d installed='%s' target='%s'"),
+           static_cast<int32>(State), *GCachedCliInfo.CliVersion, *GCachedCliInfo.TargetVersion);
+    ShowToast(TEXT("SmithUE: Automatically installing/upgrading smithue-cli and its bundled skill..."));
+    FSmithUECliChecker::ExecuteCliInstall();
+}
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -567,6 +639,31 @@ void FSmithUECliChecker::CheckCliEnvironment()
 
         const TOptional<FString> CliVer = ParseNpmLsCliVersion(LsOut);
 
+        FString ViewOut;
+        if (!NpmCliJs.IsEmpty())
+        {
+            const FBoundedRun ViewRun = RunBounded(TEXT("node.exe"),
+                FString::Printf(TEXT("\"%s\" view smithue-cli version --no-audit --no-fund --fetch-timeout=15000 --fetch-retries=1"), *NpmCliJs),
+                kRegistryQueryTimeoutSeconds, bNeverCancel, ViewOut);
+            UE_LOG(LogSmithUE, Log, TEXT("[SmithUE CLI] npm view probe: rc=%d timedout=%d out='%s'"),
+                   ViewRun.Rc, ViewRun.bTimedOut ? 1 : 0, *ViewOut.TrimStartAndEnd());
+            if (ViewRun.Rc == 0 && !ViewRun.bTimedOut)
+            {
+                TArray<FString> Lines;
+                ViewOut.ParseIntoArrayLines(Lines);
+                for (int32 LineIndex = Lines.Num() - 1; LineIndex >= 0; --LineIndex)
+                {
+                    const TOptional<FString> Candidate = ClassifyVersionProbe(0, Lines[LineIndex]);
+                    if (Candidate.IsSet())
+                    {
+                        Info.LatestVersion = Candidate.GetValue();
+                        break;
+                    }
+                }
+            }
+        }
+        Info.TargetVersion = ResolveTargetCliVersion(FString(kRecommendedCliVersion), Info.LatestVersion);
+
         // ----------------------------------------------------------------
         // 4. Compute state
         // ----------------------------------------------------------------
@@ -577,19 +674,9 @@ void FSmithUECliChecker::CheckCliEnvironment()
         else
         {
             Info.CliVersion = CliVer.GetValue();
-
-            const TOptional<FSmithUESemver> Installed   = ParseSemver(Info.CliVersion);
-            const TOptional<FSmithUESemver> Recommended = ParseSemver(FString(kRecommendedCliVersion));
-
-            if (Installed.IsSet() && Recommended.IsSet()
-                && CompareSemver(Installed.GetValue(), Recommended.GetValue()) < 0)
-            {
-                Info.State = ECliState::Outdated;
-            }
-            else
-            {
-                Info.State = ECliState::Ready;
-            }
+            Info.State = IsCliOutdated(Info.CliVersion, Info.TargetVersion)
+                ? ECliState::Outdated
+                : ECliState::Ready;
         }
         Info.bValid = true;
 
@@ -611,6 +698,7 @@ void FSmithUECliChecker::CheckCliEnvironment()
             GCachedCliInfo = Info;
             FSmithUECliChecker::OnCliCheckComplete.Broadcast();
             bCliCheckInFlight = false;
+            MaybeAutoUpgradeCli();
         });
     });
 }
@@ -626,6 +714,17 @@ void FSmithUECliChecker::ExecuteCliInstall()
 
     AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask, []()
     {
+        FSmithUEMaintenanceLock MaintenanceLock;
+        if (!MaintenanceLock.IsLocked())
+        {
+            AsyncTask(ENamedThreads::GameThread, []()
+            {
+                bInstallInFlight = false;
+                ShowToast(TEXT("SmithUE maintenance is locked by another process. Retry after it completes; a stale lock must be checked before removal."), 9.0f);
+            });
+            return;
+        }
+
         // Install via node.exe + npm-cli.js (avoids cmd.exe DETACHED_PROCESS pipe issue).
         // Fast-fail flags so a bad network gives up in ~1 min instead of npm's ~15 min
         // retry budget; the 120s hard timeout below is the absolute backstop.
@@ -639,8 +738,8 @@ void FSmithUECliChecker::ExecuteCliInstall()
         else
         {
             const FString Args = FString::Printf(
-                TEXT("\"%s\" i -g smithue-cli@latest --fetch-timeout=60000 --fetch-retries=1 --no-audit --no-fund"),
-                *NpmCli);
+                TEXT("-e \"process.env.SMITHUE_MAINTENANCE_OWNER_PID='%u';process.env.SMITHUE_MAINTENANCE_TOKEN='%s';require(process.argv[1])\" \"%s\" i -g smithue-cli@latest --fetch-timeout=60000 --fetch-retries=1 --no-audit --no-fund"),
+                FPlatformProcess::GetCurrentProcessId(), *MaintenanceLock.GetOwnerToken(), *NpmCli);
             Run = RunBounded(TEXT("node.exe"), Args, kInstallTimeoutSeconds, bInstallCancelRequested, Combined);
         }
 
@@ -733,6 +832,16 @@ FString FSmithUECliChecker::GetCliVersion()
     return GCachedCliInfo.CliVersion;
 }
 
+FString FSmithUECliChecker::GetLatestCliVersion()
+{
+    return GCachedCliInfo.LatestVersion;
+}
+
+FString FSmithUECliChecker::GetTargetCliVersion()
+{
+    return GCachedCliInfo.TargetVersion;
+}
+
 FDateTime FSmithUECliChecker::GetLastCheckTime()
 {
     return GCachedCliInfo.LastCheckTime;
@@ -755,6 +864,13 @@ ESkillState FSmithUECliChecker::GetSkillState()
 
 void FSmithUECliChecker::ReinstallSkill()
 {
+    FSmithUEMaintenanceLock MaintenanceLock;
+    if (!MaintenanceLock.IsLocked())
+    {
+        ShowToast(TEXT("SmithUE maintenance is locked by another process. Retry after it completes."), 8.0f);
+        return;
+    }
+
     // Copy the SKILL bundled in the *currently installed* CLI to the local agent-skill
     // dirs. Pure local file copy — fast enough to run synchronously on the game thread.
     const FString Source = GCachedCliInfo.SkillSourcePath;
@@ -786,19 +902,24 @@ void FSmithUECliChecker::ReinstallSkill()
         }
     }
 
+    const FString SourceDir = FPaths::GetPath(Source);
     int32 OkCount = 0;
     for (const FString& SkillsRoot : SkillsRoots)
     {
-        const FString DestDir  = SkillsRoot / TEXT("smithue-control");
-        const FString DestFile = DestDir / TEXT("SKILL.md");
+        const FString DestDir = SkillsRoot / TEXT("smithue-control");
         IFileManager::Get().MakeDirectory(*DestDir, /*Tree*/true);
-        if (IFileManager::Get().Copy(*DestFile, *Source, /*bReplace*/true) == COPY_OK)
+        if (FPlatformFileManager::Get().GetPlatformFile().CopyDirectoryTree(*DestDir, *SourceDir, true))
         {
+            if (IFileManager::Get().DirectoryExists(*(SourceDir / TEXT("references")))
+                && IFileManager::Get().DirectoryExists(*(DestDir / TEXT("reference"))))
+            {
+                IFileManager::Get().DeleteDirectory(*(DestDir / TEXT("reference")), false, true);
+            }
             ++OkCount;
         }
         else
         {
-            UE_LOG(LogSmithUE, Warning, TEXT("[SmithUE CLI] skill copy failed -> '%s'"), *DestFile);
+            UE_LOG(LogSmithUE, Warning, TEXT("[SmithUE CLI] skill bundle copy failed -> '%s'"), *DestDir);
         }
     }
 

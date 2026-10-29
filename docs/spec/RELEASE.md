@@ -47,7 +47,7 @@ dotnet "{EngineRoot}\Engine\Binaries\DotNET\UnrealBuildTool\UnrealBuildTool.dll"
 - `CHANGELOG.md`：`## 未发布（当前 UE5.2 分支）` → `## vX.Y.Z（UE5.2，YYYY-MM-DD）`。
 - `README.md` / `README.en.md`：变更日志区加 `### vX.Y.Z` 条目。
 
-> **CLI 有新版（尤其改了 SKILL）时，同步 bump `kRecommendedCliVersion`**（`Source/SmithUE/Private/Utils/SmithUECliChecker.cpp`，置为最新已发布 CLI 版本）。这样旧 CLI 机器会在「Status & Updates」面板显示 *Outdated → 升级*，而升级 CLI 会触发其 `postinstall` 重新部署最新 SKILL —— 这是 SKILL 漂移自愈的关键一环（面板同时本地比对 `~/.agents/.../SKILL.md` 与已装 CLI 自带 bundle，过期则提供「重装 SKILL」）。此常量与插件版本号无关，跟随 **CLI** 版本。
+> **`kRecommendedCliVersion` 仅表示 CLI 兼容下限，不必随每次 CLI 发版提高。** 环境探针会查询 npm 最新版本，取其与兼容下限的较高者判断是否过期；网络失败时回退兼容下限。默认开启的 `bAutoUpgradeCliOnStartup` 会在检测到 CLI 未安装或过期时，每次编辑器会话最多自动安装 / 升级一次，由 npm `postinstall` 部署配套 SKILL；用户可在「Status & Updates」关闭。面板同时比对已部署 SKILL 与已装 CLI bundle，并检查配套目录是否缺失，过期时提供完整技能包重装。只有插件确实需要更新的 CLI 才提高兼容下限；此常量与插件版本号无关。
 
 ### 3.4 重生成 TOOLS.md（工具描述 / 参数有变时）
 ```powershell

@@ -436,15 +436,15 @@ namespace SmithUEHttpServer::Private
 			{
 				Result.StatusCode = 503;
 				Result.StatusText = TEXT("Service Unavailable");
-				Result.Body       = TEXT("{\"ready\":false}");
+				Result.Body = FString::Printf(TEXT("{\"ready\":false,\"pid\":%u}"), FPlatformProcess::GetCurrentProcessId());
 				return Result;
 			}
 
 			const FString Version = InServer ? InServer->PluginVersion : TEXT("unknown");
 			const bool bPIE = InServer ? static_cast<bool>(InServer->bPIEActive) : false;
 			Result.Body = FString::Printf(
-				TEXT("{\"ready\":true,\"version\":\"%s\",\"pie_active\":%s}"),
-				*Version,
+				TEXT("{\"ready\":true,\"pid\":%u,\"version\":\"%s\",\"pie_active\":%s}"),
+				FPlatformProcess::GetCurrentProcessId(), *Version,
 				bPIE ? TEXT("true") : TEXT("false"));
 			return Result;
 		}

@@ -47,6 +47,9 @@ namespace SmithUECliInternal
      */
     SMITHUE_API TOptional<FString> ParseNpmLsCliVersion(const FString& json);
 
+    SMITHUE_API FString ResolveTargetCliVersion(const FString& Floor, const FString& NpmLatest);
+    SMITHUE_API bool IsCliOutdated(const FString& Installed, const FString& Target);
+
 } // namespace SmithUECliInternal
 
 // ---------------------------------------------------------------------------
@@ -60,8 +63,8 @@ enum class ECliState : uint8
 {
     NoNode,       // node.exe not found on PATH
     NotInstalled, // node found, but smithue-cli not globally installed
-    Outdated,     // smithue-cli installed but below the recommended floor
-    Ready         // smithue-cli installed and meets the minimum version
+    Outdated,     // smithue-cli installed but below the target version
+    Ready         // smithue-cli installed and meets the target version
 };
 
 /**
@@ -72,7 +75,7 @@ enum class ESkillState : uint8
 {
     Unknown,      // cannot determine (CLI not installed / bundle not found)
     NotDeployed,  // CLI bundle exists, but no SKILL.md deployed under ~/.agents
-    Stale,        // deployed SKILL.md differs from the installed CLI's bundle
+    Stale,        // deployed SKILL.md differs or supporting directories are missing / obsolete
     Synced        // deployed SKILL.md matches the installed CLI's bundle
 };
 
@@ -82,6 +85,8 @@ struct FCliInfo
     FString     NodeVersion;
     FString     NpmVersion;
     FString     CliVersion;
+    FString     LatestVersion;
+    FString     TargetVersion;
     ECliState   State          = ECliState::NoNode;
     FDateTime   LastCheckTime;
     bool        bValid         = false;
@@ -103,7 +108,7 @@ public:
 
     /**
      * Install or upgrade smithue-cli globally via npm.
-     * ONLY call this on an explicit user action (button press).
+    * Called by the install button or once per session when automatic upgrades are enabled.
      * Bounded by a hard timeout; cancellable via CancelCliInstall().
      */
     static void ExecuteCliInstall();
@@ -115,6 +120,8 @@ public:
     static FString   GetNodeVersion();
     static FString   GetNpmVersion();
     static FString   GetCliVersion();
+    static FString   GetLatestCliVersion();
+    static FString   GetTargetCliVersion();
     static FDateTime GetLastCheckTime();
     static bool      IsCheckInFlight();
     static bool      IsInstallInFlight();
@@ -123,8 +130,8 @@ public:
     static ESkillState GetSkillState();
 
     /**
-     * Re-deploy the smithue-control SKILL.md by copying the installed CLI's bundled
-     * SKILL.md to the local agent-skill directories (~/.agents, plus ~/.claude /
+    * Re-deploy the smithue-control bundle by copying the installed CLI's complete
+    * skill directory to the local agent-skill directories (~/.agents, plus ~/.claude /
      * ~/.codex when those roots already exist). Pure file copy, no subprocess.
      * ONLY call this on an explicit user action (button press). Re-checks on success.
      * NOTE: deploys the SKILL that ships with the *currently installed* CLI — upgrade

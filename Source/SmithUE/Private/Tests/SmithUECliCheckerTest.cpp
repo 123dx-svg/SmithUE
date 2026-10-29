@@ -12,6 +12,10 @@
 
 #include "Tests/SmithUETestBase.h"
 #include "Utils/SmithUECliChecker.h"
+#include "Utils/SmithUEMaintenanceLock.h"
+#include "HAL/FileManager.h"
+#include "HAL/PlatformProcess.h"
+#include "Misc/Paths.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
 
@@ -248,6 +252,87 @@ bool FTest_ParseNpmLsCliVersion::RunTest(const FString& Parameters)
         TestFalse(TEXT("malformed json -> empty"), R.IsSet());
     }
 
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FTest_ResolveTargetCliVersion,
+    "SmithUECliChecker.ResolveTargetCliVersion",
+    EAutomationTestFlags::ApplicationContextMask | EAutomationTestFlags::SmokeFilter)
+
+bool FTest_ResolveTargetCliVersion::RunTest(const FString& Parameters)
+{
+    using namespace SmithUECliInternal;
+    TestEqual(TEXT("registry newer than floor"),
+        ResolveTargetCliVersion(TEXT("0.13.4"), TEXT("0.16.2")), FString(TEXT("0.16.2")));
+    TestEqual(TEXT("floor newer than registry"),
+        ResolveTargetCliVersion(TEXT("0.17.0"), TEXT("0.16.2")), FString(TEXT("0.17.0")));
+    TestEqual(TEXT("equal versions"),
+        ResolveTargetCliVersion(TEXT("0.16.2"), TEXT("0.16.2")), FString(TEXT("0.16.2")));
+    TestEqual(TEXT("offline falls back to floor"),
+        ResolveTargetCliVersion(TEXT("0.13.4"), TEXT("")), FString(TEXT("0.13.4")));
+    TestEqual(TEXT("invalid registry falls back to floor"),
+        ResolveTargetCliVersion(TEXT("0.13.4"), TEXT("ERR! network")), FString(TEXT("0.13.4")));
+    TestEqual(TEXT("invalid floor uses registry"),
+        ResolveTargetCliVersion(TEXT("invalid"), TEXT("0.16.2")), FString(TEXT("0.16.2")));
+    TestEqual(TEXT("no valid versions"),
+        ResolveTargetCliVersion(TEXT(""), TEXT("")), FString());
+    TestEqual(TEXT("release floor beats prerelease"),
+        ResolveTargetCliVersion(TEXT("0.16.0"), TEXT("0.16.0-rc.1")), FString(TEXT("0.16.0")));
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FTest_IsCliOutdated,
+    "SmithUECliChecker.IsCliOutdated",
+    EAutomationTestFlags::ApplicationContextMask | EAutomationTestFlags::SmokeFilter)
+
+bool FTest_IsCliOutdated::RunTest(const FString& Parameters)
+{
+    using namespace SmithUECliInternal;
+    TestTrue(TEXT("installed meets floor but registry is newer"), IsCliOutdated(TEXT("0.13.4"), TEXT("0.16.2")));
+    TestFalse(TEXT("at target"), IsCliOutdated(TEXT("0.16.2"), TEXT("0.16.2")));
+    TestFalse(TEXT("newer installation is not downgraded"), IsCliOutdated(TEXT("0.17.0"), TEXT("0.16.2")));
+    TestFalse(TEXT("empty target"), IsCliOutdated(TEXT("0.16.2"), TEXT("")));
+    TestFalse(TEXT("invalid target"), IsCliOutdated(TEXT("0.16.2"), TEXT("invalid")));
+    TestTrue(TEXT("invalid installed version"), IsCliOutdated(TEXT("invalid"), TEXT("0.16.2")));
+    TestTrue(TEXT("prerelease behind release"), IsCliOutdated(TEXT("0.16.2-rc.1"), TEXT("0.16.2")));
+    TestFalse(TEXT("release ahead of prerelease"), IsCliOutdated(TEXT("0.16.2"), TEXT("0.16.2-rc.1")));
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FTest_MaintenanceLock,
+    "SmithUECliChecker.MaintenanceLock",
+    EAutomationTestFlags::ApplicationContextMask | EAutomationTestFlags::SmokeFilter)
+
+bool FTest_MaintenanceLock::RunTest(const FString& Parameters)
+{
+    const FString LockPath = FPaths::ConvertRelativePathToFull(FPaths::ProjectSavedDir())
+        / TEXT("Automation") / FGuid::NewGuid().ToString(EGuidFormats::Digits) / TEXT("maintenance.lock");
+    {
+        FSmithUEMaintenanceLock First(LockPath);
+        TestTrue(TEXT("first owner acquires lock"), First.IsLocked());
+        TestFalse(TEXT("owner has a delegation token"), First.GetOwnerToken().IsEmpty());
+        FSmithUEMaintenanceLock Second(LockPath);
+        TestFalse(TEXT("second owner is excluded"), Second.IsLocked());
+        const FString Args = FString::Printf(
+            TEXT("-e \"const fs=require('fs');const p=process.argv[1];const owner=JSON.parse(fs.readFileSync(p,'utf8'));if(owner.token!==process.argv[2])process.exit(2);try{fs.openSync(p,'wx');process.exit(3)}catch(error){if(!['EEXIST','EACCES','EPERM'].includes(error.code))throw error}\" \"%s\" %s"),
+            *LockPath, *First.GetOwnerToken());
+        int32 ReturnCode = -1;
+        FString StdOut, StdErr;
+        if (FPlatformProcess::ExecProcess(TEXT("node.exe"), *Args, &ReturnCode, &StdOut, &StdErr))
+        {
+            TestEqual(TEXT("Node reads UE ownership and cannot acquire its lock"), ReturnCode, 0);
+        }
+        else
+        {
+            AddWarning(TEXT("Node.js unavailable; skipped cross-runtime lock check."));
+        }
+    }
+    TestFalse(TEXT("lock is removed on release"), IFileManager::Get().FileExists(*LockPath));
+    {
+        FSmithUEMaintenanceLock Next(LockPath);
+        TestTrue(TEXT("next owner can acquire after release"), Next.IsLocked());
+    }
+    IFileManager::Get().DeleteDirectory(*FPaths::GetPath(LockPath), false, true);
     return true;
 }
 

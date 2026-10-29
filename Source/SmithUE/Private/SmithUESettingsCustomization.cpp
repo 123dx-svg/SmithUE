@@ -168,11 +168,16 @@ void FSmithUESettingsCustomization::CustomizeDetails(IDetailLayoutBuilder& Detai
 					}
 				}();
 				const FDateTime T = FSmithUECliChecker::GetLastCheckTime();
+				const FString Latest = FSmithUECliChecker::GetLatestCliVersion();
+				const FString LatestHint = Latest.IsEmpty()
+					? TEXT("latest unavailable; using compatibility floor")
+					: FString::Printf(TEXT("latest %s"), *Latest);
 				return FText::FromString(FString::Printf(
-					TEXT("CLI \u73af\u5883: node v%s \u00b7 npm %s \u00b7 smithue-cli %s \u00b7 %s \u00b7 \u4e0a\u6b21\u68c0\u6d4b %02d:%02d:%02d"),
+					TEXT("CLI \u73af\u5883: node v%s \u00b7 npm %s \u00b7 smithue-cli %s (%s) \u00b7 %s \u00b7 \u4e0a\u6b21\u68c0\u6d4b %02d:%02d:%02d"),
 					*FSmithUECliChecker::GetNodeVersion(),
 					*FSmithUECliChecker::GetNpmVersion(),
 					*FSmithUECliChecker::GetCliVersion(),
+					*LatestHint,
 					*StateStr,
 					T.GetHour(), T.GetMinute(), T.GetSecond()));
 			})
@@ -213,7 +218,7 @@ void FSmithUESettingsCustomization::CustomizeDetails(IDetailLayoutBuilder& Detai
 					{
 						case ECliState::NotInstalled: return FText::FromString(TEXT("\u5b89\u88c5 smithue-cli"));        // 安装 smithue-cli
 						case ECliState::Outdated:     return FText::FromString(TEXT("\u5347\u7ea7\u5230\u6700\u65b0"));   // 升级到最新
-						case ECliState::Ready:        return FText::FromString(TEXT("\u5df2\u662f\u6700\u65b0 \u2713"));  // 已是最新 ✓
+						case ECliState::Ready:        return FText::FromString(TEXT("\u91cd\u65b0\u5b89\u88c5 / Reinstall"));
 						case ECliState::NoNode:       return FText::FromString(TEXT("\u9700\u5148\u5b89\u88c5 Node.js")); // 需先安装 Node.js
 						default:                      return FText::FromString(TEXT("smithue-cli"));
 					}
@@ -221,7 +226,7 @@ void FSmithUESettingsCustomization::CustomizeDetails(IDetailLayoutBuilder& Detai
 				.ToolTipText_Lambda([]() -> FText {
 					switch (FSmithUECliChecker::GetState())
 					{
-						case ECliState::Ready:  return FText::FromString(TEXT("smithue-cli is up to date \u2014 no action needed"));
+						case ECliState::Ready:  return FText::FromString(TEXT("Reinstall smithue-cli@latest and refresh its bundled skill"));
 						case ECliState::NoNode: return FText::FromString(TEXT("Install Node.js first (see the link below)"));
 						default:                return FText::FromString(TEXT("Run: npm i -g smithue-cli@latest"));
 					}
@@ -229,9 +234,7 @@ void FSmithUESettingsCustomization::CustomizeDetails(IDetailLayoutBuilder& Detai
 				.IsEnabled_Lambda([]() -> bool {
 					// While installing, the button is the Cancel control and is always clickable.
 					if (FSmithUECliChecker::IsInstallInFlight()) { return true; }
-					// Otherwise actionable ONLY when something actually needs installing or upgrading.
-					const ECliState S = FSmithUECliChecker::GetState();
-					return (S == ECliState::NotInstalled || S == ECliState::Outdated)
+					return FSmithUECliChecker::GetState() != ECliState::NoNode
 						&& !FSmithUECliChecker::IsCheckInFlight();
 				})
 				.OnClicked_Lambda([]() -> FReply {
@@ -275,7 +278,7 @@ void FSmithUESettingsCustomization::CustomizeDetails(IDetailLayoutBuilder& Detai
 			[
 				SNew(SButton)
 				.Text(FText::FromString(TEXT("\u91cd\u88c5 SKILL"))) // 重装 SKILL
-				.ToolTipText(FText::FromString(TEXT("\u5c06\u5df2\u5b89\u88c5 smithue-cli \u81ea\u5e26\u7684 SKILL.md \u590d\u5236\u5230\u672c\u5730 agent \u6280\u80fd\u76ee\u5f55\u3002\u60f3\u8981\u6700\u65b0\u7248 SKILL\uff0c\u8bf7\u5148\u5347\u7ea7 CLI\u3002"))) // 将已安装 smithue-cli 自带的 SKILL.md 复制到本地 agent 技能目录。想要最新版 SKILL，请先升级 CLI。
+				.ToolTipText(FText::FromString(TEXT("Copy the installed CLI's complete skill bundle (SKILL.md, references and scripts) to local agent skill directories. Upgrade the CLI first for the newest skill.")))
 				.Visibility_Lambda([]() -> EVisibility {
 					if (!FSmithUECliChecker::GetLastCheckTime().GetTicks()) { return EVisibility::Collapsed; }
 					const ESkillState S = FSmithUECliChecker::GetSkillState();
