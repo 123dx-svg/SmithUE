@@ -161,6 +161,11 @@ npx smithue-cli exec generate_texture '{"params":{"prompt":"seamless stylized st
 
 ## Changelog
 
+### v1.16.0 (UE5.2, 2026-10-29)
+- Allocate independent ports, fall back from occupied fixed ports, and reject mismatched PID/startup-instance identities before dispatch.
+- Automatically upgrade the CLI, deploy complete skill bundles, and coordinate global maintenance with a cross-process lock.
+- Supports companion CLI 0.16.0 session bindings; validated with UE5.2 build, seven checker tests, and mixed UE5.2/UE5.8 crash/restart checks.
+
 > Full history in [CHANGELOG.md](CHANGELOG.md).
 
 ### v1.15.0 (UE5.2, 2026-07-03)

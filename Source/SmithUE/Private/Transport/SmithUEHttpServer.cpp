@@ -355,6 +355,7 @@ void USmithUEHttpServer::StartServer()
 	NewListenerSocket->GetAddress(*BoundAddr);
 	BoundPort = static_cast<uint16>(BoundAddr->GetPort());
 
+	InstanceId = FGuid::NewGuid().ToString(EGuidFormats::Digits);
 	ListenerSocket = NewListenerSocket;
 	bIsRunning = true;
 
@@ -500,13 +501,14 @@ void USmithUEHttpServer::EnsurePortFileWritten(bool bForce)
 	ProjectPath.ReplaceInline(TEXT("\\"), TEXT("/"));
 
 	const FString JsonContent = FString::Printf(
-		TEXT("{\"port\":%d,\"pid\":%u,\"project\":\"%s\",\"project_name\":\"%s\",\"started_at\":\"%s\",\"plugin_version\":\"%s\"}"),
+		TEXT("{\"port\":%d,\"pid\":%u,\"project\":\"%s\",\"project_name\":\"%s\",\"started_at\":\"%s\",\"plugin_version\":\"%s\",\"instance_id\":\"%s\"}"),
 		static_cast<int32>(BoundPort),
 		FPlatformProcess::GetCurrentProcessId(),
 		*ProjectPath,
 		FApp::GetProjectName(),
 		*FDateTime::UtcNow().ToIso8601(),
-		*PluginVersion
+		*PluginVersion,
+		*InstanceId
 	);
 
 	SmithUE_WritePortFileAtomic(PortFilePath, JsonContent);

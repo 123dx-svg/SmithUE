@@ -43,6 +43,7 @@ public:
 	/** Plugin version cached at StartServer (game thread, IPluginManager-only).
 	 *  Immutable after init — safe to read from the HTTP worker thread. */
 	FString PluginVersion = TEXT("unknown");
+	FString InstanceId;
 
 private:
 	TSharedPtr<FSocket> ListenerSocket;

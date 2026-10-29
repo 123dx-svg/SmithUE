@@ -191,6 +191,11 @@ npx smithue-cli exec generate_texture '{"params":{"prompt":"seamless stylized st
 
 ## 更新日志
 
+### v1.16.0（UE5.2，2026-10-29）
+- 独立端口分配与固定端口冲突回退；PID / 启动实例标识校验防止目标丢失后错配工程。
+- CLI / SKILL 自动升级、完整技能包重装及跨进程维护锁；与配套 CLI 0.16.0 的独立 AI 会话绑定协作。
+- UE5.2 编译、7 项检查器测试及 UE5.2 / UE5.8 混合运行与崩溃重启验证通过。
+
 > 完整历史见 [CHANGELOG.md](CHANGELOG.md)。
 
 ### v1.13.0（UE5.2，2026-06-26）

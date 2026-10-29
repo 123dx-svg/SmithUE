@@ -426,6 +426,17 @@ namespace SmithUEHttpServer::Private
 			return Result;
 		}
 
+			const FString* ExpectedPid = Request.Headers.Find(TEXT("x-smithue-expected-pid"));
+			const FString* ExpectedInstance = Request.Headers.Find(TEXT("x-smithue-expected-instance"));
+			if ((ExpectedPid && *ExpectedPid != FString::Printf(TEXT("%u"), FPlatformProcess::GetCurrentProcessId()))
+				|| (ExpectedInstance && (!InServer || *ExpectedInstance != InServer->InstanceId)))
+			{
+				Result.StatusCode = 409;
+				Result.StatusText = TEXT("Conflict");
+				Result.Body = MakeErrorBody(TEXT("Editor instance identity mismatch. Request was not executed."), TEXT("INSTANCE_MISMATCH"));
+				return Result;
+			}
+
 		// ------------------------------------------------------------------
 		//  GET /ready  — startup guard probe; non-blocking atomic read only
 		// ------------------------------------------------------------------
@@ -436,15 +447,17 @@ namespace SmithUEHttpServer::Private
 			{
 				Result.StatusCode = 503;
 				Result.StatusText = TEXT("Service Unavailable");
-				Result.Body = FString::Printf(TEXT("{\"ready\":false,\"pid\":%u}"), FPlatformProcess::GetCurrentProcessId());
+					Result.Body = FString::Printf(TEXT("{\"ready\":false,\"pid\":%u,\"instance_id\":\"%s\"}"),
+						FPlatformProcess::GetCurrentProcessId(), InServer ? *InServer->InstanceId : TEXT(""));
 				return Result;
 			}
 
 			const FString Version = InServer ? InServer->PluginVersion : TEXT("unknown");
 			const bool bPIE = InServer ? static_cast<bool>(InServer->bPIEActive) : false;
 			Result.Body = FString::Printf(
-				TEXT("{\"ready\":true,\"pid\":%u,\"version\":\"%s\",\"pie_active\":%s}"),
+				TEXT("{\"ready\":true,\"pid\":%u,\"version\":\"%s\",\"instance_id\":\"%s\",\"pie_active\":%s}"),
 				FPlatformProcess::GetCurrentProcessId(), *Version,
+				InServer ? *InServer->InstanceId : TEXT(""),
 				bPIE ? TEXT("true") : TEXT("false"));
 			return Result;
 		}
