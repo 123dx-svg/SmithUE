@@ -161,6 +161,11 @@ npx smithue-cli exec generate_texture '{"params":{"prompt":"seamless stylized st
 
 ## Changelog
 
+### v1.17.0 (UE5.8, 2026-10-29)
+- Add independent ports, PID/startup-instance request guards, and a cross-process CLI/skill maintenance lock while preserving UE5.8 modal readiness state.
+- Adapt Windows header integration and Automation flags for UE5.8 APIs; supports companion CLI 0.16.0 session and recovery workflows.
+- Validated with UE5.8.4 build, seven checker tests, two UE5.8 instances, and mixed UE5.2/UE5.8 crash/restart checks.
+
 > Full history in [CHANGELOG.md](CHANGELOG.md).
 
 ### v1.16.2 (UE5.8, 2026-07-28)

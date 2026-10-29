@@ -21,14 +21,15 @@
 ### 快速部署（Windows）
 ```bash
 # 确认编辑器已启动并启用 SmithUE 插件
-npx smithue-cli status
-npx smithue-cli exec ping '{}'
-npx smithue-cli list
+npx smithue-cli instances --terse
+npx smithue-cli --session <unique-session-id> --project "<absolute-project.uproject>" status
+npx smithue-cli --session <same-session-id> exec ping '{}'
+npx smithue-cli --session <same-session-id> list
 ```
 
 ### 故障树
 1. 编辑器未运行 → 启动虚幻引擎编辑器并等待完全加载
-2. 多实例 → 使用 `npx smithue-cli status --pid <pid>` 指定实例
+2. 多实例 → 先用 `instances` 核验，再为独立会话明确绑定工程路径或 PID；目标退出时停止，不自动换工程
 3. 端口文件已过期 → 运行 `npx smithue-cli prune` 清理
 
 ---
@@ -84,6 +85,23 @@ npx smithue-cli list
 - 查看插件更新提醒并跳转 GitHub Releases。
 
 > 即使没装 / 装不上 CLI，**插件本体的 HTTP 工具能力不受影响**——CLI 只是更顺手的消费端客户端。这对在受限网络的企业内网、旧机器上部署尤为友好。
+
+### 多编辑器与跨引擎版本
+
+每个编辑器默认使用系统分配的独立端口，固定端口被占用时自动回退。
+每个 AI 会话使用独立且稳定的 `--session`，首次明确绑定绝对工程路径或 PID，
+后续每次调用携带同一 session ID。任务开始、写入前及连接异常后，用 `instances`
+查看已核验的在线数量和实例状态；它是当次快照，不是所有 UnrealEditor 进程的常驻监控。
+
+插件在 `/ready` 和端口文件中提供 PID / `instance_id`。CLI 发送前检查目标，
+插件接收端再次拒绝身份不符的请求。编辑器退出、崩溃或重启后旧绑定失效，
+确认目标后才能显式重新绑定；不要自动重发执行结果未知的写请求。
+UE5.8 的 `modal_active` 状态保持不变。
+
+CLI 升级与 SKILL 重装共用用户级维护锁，npm 子进程继承锁所有权。
+锁被占用时稍后重试；CLI 被强制终止留下锁文件时，先确认记录的 PID 已退出再清理。
+不同引擎版本应使用各自分支和工具链编译的插件，不共享 DLL；
+UE5.2 与 UE5.8 可以共用 CLI、实例发现目录和维护锁协议。
 
 ### 多项目共享（可选）
 
@@ -180,6 +198,11 @@ npx smithue-cli exec generate_texture '{"params":{"prompt":"seamless stylized st
 ---
 
 ## 更新日志
+
+### v1.17.0（UE5.8，2026-10-29）
+- 同步独立端口、PID / 启动实例身份校验及全局 CLI / SKILL 跨进程维护锁，保留 `modal_active` 等 UE5.8 行为。
+- 按 UE5.8 API 适配 Windows 头封装与 Automation 标志；与配套 CLI 0.16.0 的会话及恢复流程协作。
+- UE5.8.4 编译、7 项检查器测试、UE5.8 双实例及 UE5.2 / UE5.8 混合崩溃重启验证通过。
 
 > 完整历史见 [CHANGELOG.md](CHANGELOG.md)。
 

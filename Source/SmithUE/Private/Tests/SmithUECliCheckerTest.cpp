@@ -12,6 +12,10 @@
 
 #include "Tests/SmithUETestBase.h"
 #include "Utils/SmithUECliChecker.h"
+#include "Utils/SmithUEMaintenanceLock.h"
+#include "HAL/FileManager.h"
+#include "HAL/PlatformProcess.h"
+#include "Misc/Paths.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
 
@@ -324,6 +328,43 @@ bool FTest_IsCliOutdated::RunTest(const FString& Parameters)
     TestTrue(TEXT("prerelease below release target -> outdated"),
         IsCliOutdated(TEXT("0.16.0-rc.1"), TEXT("0.16.0")));
 
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FTest_MaintenanceLock,
+    "SmithUECliChecker.MaintenanceLock",
+    EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::SmokeFilter)
+
+bool FTest_MaintenanceLock::RunTest(const FString& Parameters)
+{
+    const FString LockPath = FPaths::ConvertRelativePathToFull(FPaths::ProjectSavedDir())
+        / TEXT("Automation") / FGuid::NewGuid().ToString(EGuidFormats::Digits) / TEXT("maintenance.lock");
+    {
+        FSmithUEMaintenanceLock First(LockPath);
+        TestTrue(TEXT("first owner acquires lock"), First.IsLocked());
+        TestFalse(TEXT("owner has a delegation token"), First.GetOwnerToken().IsEmpty());
+        FSmithUEMaintenanceLock Second(LockPath);
+        TestFalse(TEXT("second owner is excluded"), Second.IsLocked());
+        const FString Args = FString::Printf(
+            TEXT("-e \"const fs=require('fs');const p=process.argv[1];const owner=JSON.parse(fs.readFileSync(p,'utf8'));if(owner.token!==process.argv[2])process.exit(2);try{fs.openSync(p,'wx');process.exit(3)}catch(error){if(!['EEXIST','EACCES','EPERM'].includes(error.code))throw error}\" \"%s\" %s"),
+            *LockPath, *First.GetOwnerToken());
+        int32 ReturnCode = -1;
+        FString StdOut, StdErr;
+        if (FPlatformProcess::ExecProcess(TEXT("node.exe"), *Args, &ReturnCode, &StdOut, &StdErr))
+        {
+            TestEqual(TEXT("Node reads UE ownership and cannot acquire its lock"), ReturnCode, 0);
+        }
+        else
+        {
+            AddWarning(TEXT("Node.js unavailable; skipped cross-runtime lock check."));
+        }
+    }
+    TestFalse(TEXT("lock is removed on release"), IFileManager::Get().FileExists(*LockPath));
+    {
+        FSmithUEMaintenanceLock Next(LockPath);
+        TestTrue(TEXT("next owner can acquire after release"), Next.IsLocked());
+    }
+    IFileManager::Get().DeleteDirectory(*FPaths::GetPath(LockPath), false, true);
     return true;
 }
 

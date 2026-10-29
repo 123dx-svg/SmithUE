@@ -19,11 +19,11 @@ public:
 
 	/** Port the SmithUE HTTP server binds to on startup.
 	 *  Override precedence (highest to lowest): command-line SmithUEhttpport= > SMITHUE_BIND_PORT env var > this setting.
-	 *  Valid range: 1024–65535. Default: 13721. Requires Editor restart. */
+	 *  Zero selects an OS-assigned port; occupied fixed ports fall back to an OS-assigned port. Requires Editor restart. */
 	UPROPERTY(config, EditAnywhere, Category="Server",
-		meta=(ClampMin=1024, ClampMax=65535,
-			  ToolTip="HTTP port SmithUE listens on. Overridden by SMITHUE_BIND_PORT env var or -SmithUEhttpport= command line. Requires Editor restart."))
-	int32 HttpBindPort = 13721;
+		meta=(ClampMin=0, ClampMax=65535,
+			  ToolTip="HTTP port SmithUE listens on. 0 automatically allocates an independent port. Occupied fixed ports fall back to automatic allocation. Requires Editor restart."))
+	int32 HttpBindPort = 0;
 
 	/** If false, the SmithUE HTTP server will not start automatically when the Editor launches.
 	 *  Requires Editor restart. */

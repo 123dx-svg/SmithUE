@@ -1,6 +1,7 @@
 // Copyright 2026, 123dx-svg. MIT License.
 
 #include "Utils/SmithUECliChecker.h"
+#include "Utils/SmithUEMaintenanceLock.h"
 
 #include "HAL/PlatformProcess.h"
 #include "HAL/FileManager.h"
@@ -795,6 +796,17 @@ void FSmithUECliChecker::ExecuteCliInstall()
 
     AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask, []()
     {
+        FSmithUEMaintenanceLock MaintenanceLock;
+        if (!MaintenanceLock.IsLocked())
+        {
+            AsyncTask(ENamedThreads::GameThread, []()
+            {
+                bInstallInFlight = false;
+                ShowToast(TEXT("SmithUE maintenance is locked by another process. Retry after it completes; a stale lock must be checked before removal."), 9.0f);
+            });
+            return;
+        }
+
         // Install via node.exe + npm-cli.js (avoids cmd.exe DETACHED_PROCESS pipe issue).
         // Fast-fail flags so a bad network gives up in ~1 min instead of npm's ~15 min
         // retry budget; the 120s hard timeout below is the absolute backstop.
@@ -808,8 +820,8 @@ void FSmithUECliChecker::ExecuteCliInstall()
         else
         {
             const FString Args = FString::Printf(
-                TEXT("\"%s\" i -g smithue-cli@latest --fetch-timeout=60000 --fetch-retries=1 --no-audit --no-fund"),
-                *NpmCli);
+                TEXT("-e \"process.env.SMITHUE_MAINTENANCE_OWNER_PID='%u';process.env.SMITHUE_MAINTENANCE_TOKEN='%s';require(process.argv[1])\" \"%s\" i -g smithue-cli@latest --fetch-timeout=60000 --fetch-retries=1 --no-audit --no-fund"),
+                FPlatformProcess::GetCurrentProcessId(), *MaintenanceLock.GetOwnerToken(), *NpmCli);
             Run = RunBounded(TEXT("node.exe"), Args, kInstallTimeoutSeconds, bInstallCancelRequested, Combined);
         }
 
@@ -939,6 +951,13 @@ ESkillState FSmithUECliChecker::GetSkillState()
 
 void FSmithUECliChecker::ReinstallSkill()
 {
+    FSmithUEMaintenanceLock MaintenanceLock;
+    if (!MaintenanceLock.IsLocked())
+    {
+        ShowToast(TEXT("SmithUE maintenance is locked by another process. Retry after it completes."), 8.0f);
+        return;
+    }
+
     // Copy the SKILL bundled in the *currently installed* CLI to the local agent-skill
     // dirs. Pure local file copy — fast enough to run synchronously on the game thread.
     const FString Source = GCachedCliInfo.SkillSourcePath;

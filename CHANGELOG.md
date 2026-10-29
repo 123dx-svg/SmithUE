@@ -1,5 +1,15 @@
 # SmithUE Changelog
 
+## v1.17.0（UE5.8，2026-10-29）
+
+### 修复：多编辑器隔离与实例生命周期保护
+
+- HTTP 默认端口改为 `0`，由系统为每个编辑器分配独立端口；旧固定端口被占用时自动回退，监听关闭地址复用。端口文件继续按 PID 保存实际端口。
+- 服务每次启动生成 `instance_id`，由端口文件和 `/ready` 返回；接收端核验预期 PID / 实例标识，错配返回 HTTP 409，不执行工具。保留 UE5.8 已有的 `modal_active`、PIE 状态与请求分派逻辑。
+- 全局 CLI 安装与完整 SKILL 重装加入用户级跨进程维护锁，并向 npm 子进程传递锁所有权。与配套 CLI、UE5.2 分支使用相同协议，锁冲突时提示稍后重试，不阻塞编辑器主线程。
+- UE5.8 适配：维护锁通过 `Windows/WindowsHWrapper.h` 调用 Win32 API；Automation 测试使用 `EAutomationTestFlags_ApplicationContextMask`。在 UE5.8.4 / .NET 10 / MSVC 14.44 上编译通过，7 项检查器测试通过。
+- 运行态验证：UE5.8 双实例，以及 UE5.8 AIDemo5 与 UE5.2 AIScript 混合运行，均通过独立端口、在线枚举、错误身份拒绝、会话隔离、崩溃重启后拒绝旧绑定与显式重新绑定验证。
+
 ## v1.16.4（UE5.8，2026-08-31）
 
 ### smithue-cli 自动升级：不再需要用户点按钮
