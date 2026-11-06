@@ -14,22 +14,36 @@
 
 A high-performance Unreal Engine editor plugin that exposes the editor's full capabilities through a command protocol, turning repetitive manual operations into scriptable, AI-driven workflows.
 
+> This is a **local v1.16.1 compatibility build for UE5.5.4 / Win64**, based on v1.16.0, not the upstream UE5.2 binary package. The archive contains a DLL rebuilt for UE5.5.4; rebuilding your project is not required. The original UE5.2 package is unchanged.
+
+Loaded and tested in an isolated Blueprint-only project on UE5.5.4 (CL 40574608 / BuildId 37670630). All 7 CLI checker automation tests passed. Material layout and wiring, animation property binding/readback/unbinding, and undo/redo were verified.
+
+**For UE5.5, manually install this local ZIP. Do not run the upstream online one-click installation commands later in this document: upstream has no UE5.5 release package.**
+
 ---
 
 ## For AI Agents
 
 ### Quick Deployment (Windows)
 ```bash
-# Verify editor is running and SmithUE plugin is enabled
-npx smithue-cli status
-npx smithue-cli exec ping '{}'
-npx smithue-cli list
+# Verify instances, then bind a unique AI session to the intended PID
+smithue-cli instances --terse
+smithue-cli --session <unique-session-id> --pid <target-pid> status --terse
+smithue-cli --session <same-session-id> list
 ```
 
 ### Troubleshooting Tree
 1. Editor not running → Start Unreal Engine Editor and wait for full load
 2. Multiple instances → Use `npx smithue-cli status --pid <pid>` to specify instance
 3. Stale portfiles → Run `npx smithue-cli prune` to clean up
+4. CLI v0.16.0 intermittently failed connection probes and reported a libuv assertion during validation. No global CLI upgrade was performed. The full runtime checks passed using the included [identity-guarded PowerShell fallback](scripts/smithue.ps1). Enumerate and bind the intended instance with the CLI first, then run from the plugin directory:
+
+```powershell
+$env:SMITHUE_SESSION = '<same-unique-session-id>'
+.\scripts\smithue.ps1 get_editor_state
+```
+
+Do not bypass instance verification with a raw port or automatically repeat timed-out writes.
 
 ---
 
@@ -50,20 +64,21 @@ npx smithue-cli list
 
 ## Quick Start
 
-1. Clone into `{YourProject}/Plugins/` on branch `UE5.2`:
-   ```bash
-   cd {YourProject}/Plugins
-   git clone -b UE5.2 https://github.com/123dx-svg/SmithUE.git
+1. Save changes and close the target project's editor. Other project editors may stay open.
+
+2. Move the entire old SmithUE plugin outside the project's `Plugins` directory as a backup. Renaming its folder is insufficient: the project must not discover two `SmithUE.uplugin` descriptors.
+
+3. Extract this archive so the descriptor is at `{YourProject}\Plugins\SmithUE\SmithUE.uplugin`. Keep `Binaries\Win64`; do not mix in UE5.2 DLLs or manually change the module `BuildId`.
+
+4. Open the project with UE5.5.4, enable SmithUE under Edit > Plugins, and restart when prompted. This package is built for the Win64 editor only, not game runtime targets.
+
+5. Verify the connection:
+   ```powershell
+   smithue-cli instances --terse
+   smithue-cli --session <unique-session-id> --pid <target-pid> status --terse
    ```
 
-2. Build your project with Unreal Engine 5.2.
-
-3. Launch the editor. SmithUE automatically starts the HTTP server and assigns a dynamic port.
-
-4. Verify the connection:
-   ```bash
-   npx smithue-cli status
-   ```
+> UAT conventionally writes descriptor `EngineVersion` as `5.5.0`. The DLL is built with UE5.5.4; compatibility depends on the engine build identity and actual editor loading. A different custom UE5.5 build may require a plugin rebuild, not a version-check bypass.
 
 ### Self-check & one-click CLI install (recommended)
 
@@ -86,7 +101,7 @@ AI Tool (OpenCode / Claude Code / Cline / GitHub Copilot)
      ↕ smithue-cli (npx smithue-cli exec/list/search/status)
 SmithUE UE5 Plugin (HTTP :dynamic port)
      ↕ UE Reflection API
-Unreal Engine 5.2 Editor
+Unreal Engine 5.5.4 Editor
 ```
 
 ---
@@ -232,7 +247,7 @@ npx smithue-cli exec generate_texture '{"params":{"prompt":"seamless stylized st
 - **SceneTexture**: `SceneTextureId` is set via FProperty reflection to avoid link errors with unexported engine symbols.
 - **OS**: Windows Win64 only.
 - **CLI is an optional consumer**: `smithue-cli` is a convenience client; its install / upgrade depends on the network (with a built-in 120s timeout, cancel, and manual fallback). **The plugin itself works without it.**
-- **Engine version**: mainline targets UE 5.2; other versions require adaptation.
+- **Engine version**: this local compatibility package targets UE5.5.4 / Win64. Upstream UE5.2 DLLs cannot replace this package's binaries.
 
 ---
 

@@ -1,25 +1,25 @@
 {
 	"FileVersion": 3,
-	"Version": 13,
-	"VersionName": "1.16.0",
+	"Version": 14,
+	"VersionName": "1.16.1",
 	"FriendlyName": "SmithUE",
-	"Description": "Full-stack AI tool service plugin for Unreal Engine 5.2 - exposes 221 editor automation tools via HTTP JSON, with AI texture/audio generation (Pollinations.ai)",
+	"Description": "Full-stack AI tool service plugin for Unreal Engine 5.5 - local compatibility build with editor automation tools via HTTP JSON",
 	"Category": "Editor",
 	"CreatedBy": "123dx-svg",
 	"CreatedByURL": "https://github.com/123dx-svg/SmithUE",
 	"DocsURL": "https://github.com/123dx-svg/SmithUE#readme",
 	"MarketplaceURL": "",
 	"SupportURL": "https://github.com/123dx-svg/SmithUE/issues",
+	"EngineVersion": "5.5.0",
 	"CanContainContent": false,
 	"IsBetaVersion": true,
-	"IsExperimentalVersion": false,
-	"Installed": false,
+	"Installed": true,
 	"Modules": [
 		{
 			"Name": "SmithUE",
 			"Type": "Editor",
 			"LoadingPhase": "Default",
-			"WhitelistPlatforms": [
+			"PlatformAllowList": [
 				"Win64",
 				"Mac",
 				"Linux"

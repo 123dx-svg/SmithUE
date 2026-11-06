@@ -8,6 +8,7 @@
 #include "Misc/Parse.h"
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonWriter.h"
+#include "Utils/SmithUECommonUtils.h"
 
 namespace
 {

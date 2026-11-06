@@ -14,22 +14,36 @@
 
 一款高性能虚幻引擎编辑器插件，通过命令协议公开编辑器的全部功能，将重复的手动操作转变为可脚本化、AI 驱动的工作流。
 
+> 本目录为基于 v1.16.0 的 **v1.16.1 UE5.5.4 / Win64 本地兼容构建**，不是上游 UE5.2 预编译包。安装包包含针对 UE5.5.4 重新构建的 DLL，不需要重新编译你的工程。原始 UE5.2 包保持不变。
+
+已在 UE5.5.4（CL 40574608 / BuildId 37670630）的独立蓝图工程中实际加载。7/7 项 CLI 检查器自动化测试通过；材质图布局及连线、动画属性绑定/读回/解绑和撤销/重做均已验证。
+
+**UE5.5 安装请使用本地 ZIP 的手动安装步骤，不要运行本文后续的上游在线一键安装命令：上游没有 UE5.5 发行包。**
+
 ---
 
 ## For AI Agents
 
 ### 快速部署（Windows）
 ```bash
-# 确认编辑器已启动并启用 SmithUE 插件
-npx smithue-cli status
-npx smithue-cli exec ping '{}'
-npx smithue-cli list
+# 枚举并核验编辑器，再为当前 AI 会话明确绑定目标 PID
+smithue-cli instances --terse
+smithue-cli --session <独立会话ID> --pid <目标PID> status --terse
+smithue-cli --session <同一会话ID> list
 ```
 
 ### 故障树
 1. 编辑器未运行 → 启动虚幻引擎编辑器并等待完全加载
 2. 多实例 → 使用 `npx smithue-cli status --pid <pid>` 指定实例
 3. 端口文件已过期 → 运行 `npx smithue-cli prune` 清理
+4. 本次验证中 CLI v0.16.0 偶发连接探测失败及 libuv 异常 → 未全局升级 CLI；完整运行验证使用了包内的[带身份校验的 PowerShell 备用客户端](scripts/smithue.ps1)。先用 CLI 枚举并绑定正确实例，再在插件目录中调用：
+
+```powershell
+$env:SMITHUE_SESSION = '<同一独立会话ID>'
+.\scripts\smithue.ps1 get_editor_state
+```
+
+不要用裸端口绕过实例校验，也不要自动重复超时的写操作。
 
 ---
 
@@ -50,20 +64,21 @@ npx smithue-cli list
 
 ## 快速入门
 
-1. 将仓库克隆到项目的 `Plugins/` 目录，并切换到 `UE5.2` 分支：
-   ```bash
-   cd {YourProject}/Plugins
-   git clone -b UE5.2 https://github.com/123dx-svg/SmithUE.git
+1. 关闭目标工程的编辑器，保存未保存的修改。其他工程的编辑器不必关闭。
+
+2. 把旧 SmithUE 插件整个移到工程 `Plugins` 目录之外备份。仅重命名旧目录不够：不要让同一个工程同时发现两份 `SmithUE.uplugin`。
+
+3. 解压此安装包，确保最终目录为 `{YourProject}\Plugins\SmithUE\SmithUE.uplugin`。保留包内的 `Binaries\Win64`；不要混入 UE5.2 DLL，也不要手动修改 `UnrealEditor.modules` 的 `BuildId`。
+
+4. 用 UE5.5.4 打开工程，在「编辑 → 插件」启用 SmithUE，按提示重启。该包只为 Win64 编辑器构建，不是游戏运行时插件。
+
+5. 验证安装：
+   ```powershell
+   smithue-cli instances --terse
+   smithue-cli --session <独立会话ID> --pid <目标PID> status --terse
    ```
 
-2. 使用虚幻引擎 5.2 构建项目（首次编译约 50 秒）。
-
-3. 启动编辑器。SmithUE 将自动启动 HTTP 服务器并分配动态端口。
-
-4. 验证安装：
-   ```bash
-   npx smithue-cli status
-   ```
+> 本包使用 UE5.5.4 构建；UAT 按惯例将描述符 `EngineVersion` 写为 `5.5.0`。实际 DLL 的兼容性以引擎构建身份和编辑器加载结果为准。其他自定义 UE5.5 构建若提示模块不兼容，需要重新构建插件，不能靠改版本号绕过。
 
 ### 安装成功的标志
 
@@ -261,7 +276,7 @@ npx smithue-cli exec generate_texture '{"params":{"prompt":"seamless stylized st
 - **场景纹理**：`SceneTextureId` 通过 FProperty 反射设置，以避免未导出引擎符号的链接错误。
 - **操作系统**：仅限 Windows Win64。
 - **CLI 为可选消费端**：`smithue-cli` 是便利客户端，其安装 / 升级依赖网络（已内置 120s 超时、可取消与手动兜底）；**插件本体不依赖它即可工作**。
-- **引擎版本**：当前主线针对 UE 5.2；其他版本需自行适配。
+- **引擎版本**：此本地兼容包针对 UE5.5.4 / Win64；上游 UE5.2 包不能直接替代本包的 DLL。
 
 ---
 

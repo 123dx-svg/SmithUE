@@ -24,7 +24,7 @@
 // ---------------------------------------------------------------------------
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FTest_ParseSemver,
     "SmithUECliChecker.ParseSemver",
-    EAutomationTestFlags::ApplicationContextMask | EAutomationTestFlags::SmokeFilter)
+    EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::SmokeFilter)
 
 bool FTest_ParseSemver::RunTest(const FString& Parameters)
 {
@@ -114,7 +114,7 @@ bool FTest_ParseSemver::RunTest(const FString& Parameters)
 // ---------------------------------------------------------------------------
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FTest_CompareSemver,
     "SmithUECliChecker.CompareSemver",
-    EAutomationTestFlags::ApplicationContextMask | EAutomationTestFlags::SmokeFilter)
+    EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::SmokeFilter)
 
 bool FTest_CompareSemver::RunTest(const FString& Parameters)
 {
@@ -156,7 +156,7 @@ bool FTest_CompareSemver::RunTest(const FString& Parameters)
 // ---------------------------------------------------------------------------
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FTest_ClassifyVersionProbe,
     "SmithUECliChecker.ClassifyVersionProbe",
-    EAutomationTestFlags::ApplicationContextMask | EAutomationTestFlags::SmokeFilter)
+    EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::SmokeFilter)
 
 bool FTest_ClassifyVersionProbe::RunTest(const FString& Parameters)
 {
@@ -202,7 +202,7 @@ bool FTest_ClassifyVersionProbe::RunTest(const FString& Parameters)
 // ---------------------------------------------------------------------------
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FTest_ParseNpmLsCliVersion,
     "SmithUECliChecker.ParseNpmLsCliVersion",
-    EAutomationTestFlags::ApplicationContextMask | EAutomationTestFlags::SmokeFilter)
+    EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::SmokeFilter)
 
 bool FTest_ParseNpmLsCliVersion::RunTest(const FString& Parameters)
 {
@@ -257,7 +257,7 @@ bool FTest_ParseNpmLsCliVersion::RunTest(const FString& Parameters)
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FTest_ResolveTargetCliVersion,
     "SmithUECliChecker.ResolveTargetCliVersion",
-    EAutomationTestFlags::ApplicationContextMask | EAutomationTestFlags::SmokeFilter)
+    EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::SmokeFilter)
 
 bool FTest_ResolveTargetCliVersion::RunTest(const FString& Parameters)
 {
@@ -283,7 +283,7 @@ bool FTest_ResolveTargetCliVersion::RunTest(const FString& Parameters)
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FTest_IsCliOutdated,
     "SmithUECliChecker.IsCliOutdated",
-    EAutomationTestFlags::ApplicationContextMask | EAutomationTestFlags::SmokeFilter)
+    EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::SmokeFilter)
 
 bool FTest_IsCliOutdated::RunTest(const FString& Parameters)
 {
@@ -301,7 +301,7 @@ bool FTest_IsCliOutdated::RunTest(const FString& Parameters)
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FTest_MaintenanceLock,
     "SmithUECliChecker.MaintenanceLock",
-    EAutomationTestFlags::ApplicationContextMask | EAutomationTestFlags::SmokeFilter)
+    EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::SmokeFilter)
 
 bool FTest_MaintenanceLock::RunTest(const FString& Parameters)
 {

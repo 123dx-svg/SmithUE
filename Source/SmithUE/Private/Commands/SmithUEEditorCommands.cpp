@@ -978,7 +978,11 @@ namespace GraphLayoutInternal
     {
         if (!Expr) return 100.f;
         // Custom nodes are tall due to code preview + many inputs
-        int32 NumInputs = Expr->GetInputs().Num();
+        int32 NumInputs = 0;
+        for (FExpressionInputIterator Input(Expr); Input; ++Input)
+        {
+            ++NumInputs;
+        }
         float BaseHeight = 80.f;
         float PerInputHeight = 28.f;
         float Height = BaseHeight + NumInputs * PerInputHeight;
@@ -1039,10 +1043,9 @@ namespace GraphLayoutInternal
         {
             UMaterialExpression* Expr = Expressions[i];
             if (!Expr) continue;
-            const TArray<FExpressionInput*> Inputs = Expr->GetInputs();
-            for (FExpressionInput* Input : Inputs)
+            for (FExpressionInputIterator Input(Expr); Input; ++Input)
             {
-                if (Input && Input->Expression)
+                if (Input->Expression)
                 {
                     int32* PredIdx = ExprToIndex.Find(Input->Expression);
                     if (PredIdx)

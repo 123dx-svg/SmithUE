@@ -504,6 +504,42 @@ namespace
 		return AnimNode;
 	}
 
+	bool ResolveAnimNodePropertyBindings(
+		UAnimGraphNode_Base* AnimNode,
+		UObject*& BindingObject,
+		TMap<FName, FAnimGraphNodePropertyBinding>*& PropertyBindings,
+		FString& OutError)
+	{
+		BindingObject = nullptr;
+		PropertyBindings = nullptr;
+		const FObjectPropertyBase* BindingProperty = FindFProperty<FObjectPropertyBase>(AnimNode->GetClass(), TEXT("Binding"));
+		if (!BindingProperty)
+		{
+			OutError = TEXT("This anim node does not expose UE5.5 Binding storage. Use a supported AnimGraph node and run bp_read_anim_node.");
+			return false;
+		}
+
+		BindingObject = BindingProperty->GetObjectPropertyValue_InContainer(AnimNode);
+		if (!BindingObject)
+		{
+			return true;
+		}
+
+		// UE5.5's default binding implementation is private; use its typed reflected UPROPERTY.
+		FMapProperty* MapProperty = FindFProperty<FMapProperty>(BindingObject->GetClass(), TEXT("PropertyBindings"));
+		const FStructProperty* ValueProperty = MapProperty ? CastField<FStructProperty>(MapProperty->ValueProp) : nullptr;
+		const UScriptStruct* BindingStruct = FindObject<UScriptStruct>(nullptr, TEXT("/Script/AnimGraph.AnimGraphNodePropertyBinding"));
+		if (!MapProperty || !CastField<FNameProperty>(MapProperty->KeyProp) ||
+			!ValueProperty || !BindingStruct || ValueProperty->Struct != BindingStruct)
+		{
+			OutError = FString::Printf(TEXT("Anim binding class '%s' does not expose the supported property-binding map. Configure this custom binding class in the AnimBlueprint editor."), *BindingObject->GetClass()->GetPathName());
+			return false;
+		}
+
+		PropertyBindings = MapProperty->ContainerPtrToValuePtr<TMap<FName, FAnimGraphNodePropertyBinding>>(BindingObject);
+		return true;
+	}
+
 	FStructProperty* FindAnimNodeStructProperty(UAnimGraphNode_Base* AnimNode)
 	{
 		if (!AnimNode)
@@ -2304,13 +2340,35 @@ TSharedPtr<FJsonObject> FSmithUEBpAtomicAPI::HandleBpBindAnimProperty(const TSha
 	}
 
 	const FName BindingName = AnimNode->ShowPinForProperties[OptionalPinIndex].PropertyName;
+	if (!VariableName.IsEmpty() && !BlueprintHasMemberVariable(Blueprint, VariableName))
+	{
+		return FSmithUECommonUtils::CreateErrorResponse(FString::Printf(TEXT("Member variable '%s' not found on this AnimBlueprint. bp_bind_anim_property only supports member variables (not wires/functions/external paths). Available member variables: %s."), *VariableName, *JoinPropertyNames(GetBlueprintMemberVariableNames(Blueprint))));
+	}
+
+	UObject* BindingObject = nullptr;
+	TMap<FName, FAnimGraphNodePropertyBinding>* PropertyBindings = nullptr;
+	if (!ResolveAnimNodePropertyBindings(AnimNode, BindingObject, PropertyBindings, Error))
+	{
+		return FSmithUECommonUtils::CreateErrorResponse(Error);
+	}
+	if (!VariableName.IsEmpty() && !PropertyBindings)
+	{
+		return FSmithUECommonUtils::CreateErrorResponse(TEXT("Anim node has no UE5.5 binding object. Recreate the node in the AnimBlueprint editor, then run bp_read_anim_node."));
+	}
+
 	const FScopedTransaction Transaction(NSLOCTEXT("SmithUE", "BpBindAnimProperty", "SmithUE: Bind Anim Property"));
 	Blueprint->Modify();
 	AnimNode->Modify();
+	if (BindingObject)
+	{
+		BindingObject->SetFlags(RF_Transactional);
+		BindingObject->Modify();
+	}
 
 	if (VariableName.IsEmpty())
 	{
-		const bool bRemoved = AnimNode->PropertyBindings.Remove(BindingName) > 0;
+		const bool bRemoved = AnimNode->HasBinding(BindingName);
+		AnimNode->RemoveBindings(BindingName);
 		AnimNode->ReconstructNode();
 		FBlueprintEditorUtils::MarkBlueprintAsModified(Blueprint);
 		TSharedPtr<FJsonObject> Data = MakeShared<FJsonObject>();
@@ -2318,11 +2376,6 @@ TSharedPtr<FJsonObject> FSmithUEBpAtomicAPI::HandleBpBindAnimProperty(const TSha
 		Data->SetBoolField(TEXT("bound"), false);
 		Data->SetBoolField(TEXT("removed"), bRemoved);
 		return FSmithUECommonUtils::CreateSuccessResponse(Data);
-	}
-
-	if (!BlueprintHasMemberVariable(Blueprint, VariableName))
-	{
-		return FSmithUECommonUtils::CreateErrorResponse(FString::Printf(TEXT("Member variable '%s' not found on this AnimBlueprint. bp_bind_anim_property only supports member variables (not wires/functions/external paths). Available member variables: %s."), *VariableName, *JoinPropertyNames(GetBlueprintMemberVariableNames(Blueprint))));
 	}
 
 	AnimNode->SetPinVisibility(true, OptionalPinIndex);
@@ -2337,7 +2390,7 @@ TSharedPtr<FJsonObject> FSmithUEBpAtomicAPI::HandleBpBindAnimProperty(const TSha
 	Binding.PathAsText = FText::FromString(VariableName);
 	Binding.Type = EAnimGraphNodePropertyBindingType::Property;
 	Binding.bIsBound = true;
-	AnimNode->PropertyBindings.Add(BindingName, Binding);
+	PropertyBindings->Add(BindingName, Binding);
 	AnimNode->ReconstructNode();
 	FBlueprintEditorUtils::MarkBlueprintAsModified(Blueprint);
 
@@ -2399,15 +2452,24 @@ TSharedPtr<FJsonObject> FSmithUEBpAtomicAPI::HandleBpReadAnimNode(const TSharedP
 	}
 
 	TArray<TSharedPtr<FJsonValue>> BindingsArray;
-	for (const TPair<FName, FAnimGraphNodePropertyBinding>& BindingPair : AnimNode->PropertyBindings)
+	UObject* BindingObject = nullptr;
+	TMap<FName, FAnimGraphNodePropertyBinding>* PropertyBindings = nullptr;
+	if (!ResolveAnimNodePropertyBindings(AnimNode, BindingObject, PropertyBindings, Error))
 	{
-		TSharedPtr<FJsonObject> BindingObj = MakeShared<FJsonObject>();
-		BindingObj->SetStringField(TEXT("property"), BindingPair.Key.ToString());
-		AppendJsonNameArray(BindingObj, TEXT("property_path"), BindingPair.Value.PropertyPath);
-		BindingObj->SetStringField(TEXT("path_text"), BindingPair.Value.PathAsText.ToString());
-		BindingObj->SetBoolField(TEXT("is_bound"), BindingPair.Value.bIsBound);
-		BindingObj->SetStringField(TEXT("type"), BindingPair.Value.Type == EAnimGraphNodePropertyBindingType::Function ? TEXT("Function") : (BindingPair.Value.Type == EAnimGraphNodePropertyBindingType::Property ? TEXT("Property") : TEXT("None")));
-		BindingsArray.Add(MakeShared<FJsonValueObject>(BindingObj));
+		return FSmithUECommonUtils::CreateErrorResponse(Error);
+	}
+	if (PropertyBindings)
+	{
+		for (const TPair<FName, FAnimGraphNodePropertyBinding>& BindingPair : *PropertyBindings)
+		{
+			TSharedPtr<FJsonObject> BindingObj = MakeShared<FJsonObject>();
+			BindingObj->SetStringField(TEXT("property"), BindingPair.Key.ToString());
+			AppendJsonNameArray(BindingObj, TEXT("property_path"), BindingPair.Value.PropertyPath);
+			BindingObj->SetStringField(TEXT("path_text"), BindingPair.Value.PathAsText.ToString());
+			BindingObj->SetBoolField(TEXT("is_bound"), BindingPair.Value.bIsBound);
+			BindingObj->SetStringField(TEXT("type"), BindingPair.Value.Type == EAnimGraphNodePropertyBindingType::Function ? TEXT("Function") : (BindingPair.Value.Type == EAnimGraphNodePropertyBindingType::Property ? TEXT("Property") : TEXT("None")));
+			BindingsArray.Add(MakeShared<FJsonValueObject>(BindingObj));
+		}
 	}
 
 	TSharedPtr<FJsonObject> Data = MakeShared<FJsonObject>();
